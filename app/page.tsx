@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertCircle,
   AlignCenter,
+  AlignJustify,
   AlignLeft,
   AlignRight,
   Check,
@@ -10,6 +12,7 @@ import {
   Download,
   FileText,
   FolderOpen,
+  LoaderCircle,
   RotateCcw,
   Sparkles,
   UploadCloud,
@@ -30,6 +33,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  analyzeHwpx,
+  formatHwpx,
+  type HwpxAnalysis,
+  type HwpxFormatSettings,
+} from "@/lib/hwpx-parser";
 
 const initialSettings = {
   font: "본고딕",
@@ -106,22 +115,53 @@ export default function Home() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileSize, setFileSize] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<HwpxAnalysis | null>(null);
+  const [originalBuffer, setOriginalBuffer] = useState<ArrayBuffer | null>(null);
+  const [convertedFile, setConvertedFile] = useState<{
+    bytes: Uint8Array<ArrayBuffer>;
+    analysis: HwpxAnalysis;
+    fileName: string;
+  } | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [settings, setSettings] = useState<Settings>(initialSettings);
 
   const updateSetting = (key: keyof Settings, value: string) => {
     setSettings((current) => ({ ...current, [key]: value }));
+    setConvertedFile(null);
+    setApplyError(null);
   };
 
-  const acceptFile = (file?: File) => {
+  const acceptFile = async (file?: File) => {
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".hwpx")) {
       setFileError("HWPX 파일만 선택할 수 있어요.");
+      setAnalysis(null);
+      setOriginalBuffer(null);
+      setConvertedFile(null);
       return;
     }
     setFileName(file.name);
     setFileSize(`${(file.size / 1024 / 1024).toFixed(2)} MB`);
     setFileError(null);
+    setAnalysis(null);
+    setOriginalBuffer(null);
+    setConvertedFile(null);
+    setApplyError(null);
+    setAnalyzing(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      setOriginalBuffer(buffer);
+      setAnalysis(await analyzeHwpx(buffer));
+    } catch (error) {
+      setFileError(
+        error instanceof Error ? error.message : "HWPX 문서를 분석하는 중 오류가 발생했습니다.",
+      );
+    } finally {
+      setAnalyzing(false);
+    }
   };
 
   const resetAll = () => {
@@ -129,6 +169,12 @@ export default function Home() {
     setFileName(null);
     setFileSize(null);
     setFileError(null);
+    setAnalysis(null);
+    setOriginalBuffer(null);
+    setConvertedFile(null);
+    setAnalyzing(false);
+    setApplying(false);
+    setApplyError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -141,7 +187,7 @@ export default function Home() {
       font: selectOptions.font,
       fontSize: selectOptions.fontSize,
       lineSpacing: selectOptions.lineSpacing,
-      alignment: ["왼쪽", "가운데", "오른쪽"],
+      alignment: ["왼쪽", "가운데", "오른쪽", "양쪽"],
       indentation: selectOptions.indentation,
     } as const;
 
@@ -189,6 +235,72 @@ export default function Home() {
     ([key, value]) => value !== initialSettings[key as keyof Settings],
   ).length;
 
+  const applyFormatting = async () => {
+    if (!originalBuffer || !analysis || !fileName) return;
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const alignmentMap: Record<Settings["alignment"], HwpxFormatSettings["alignment"]> = {
+        왼쪽: "LEFT",
+        가운데: "CENTER",
+        오른쪽: "RIGHT",
+        양쪽: "JUSTIFY",
+      };
+      const bytes = formatHwpx(originalBuffer, {
+        font: settings.font,
+        fontSize: Number(settings.fontSize),
+        lineSpacing: Number(settings.lineSpacing),
+        alignment: alignmentMap[settings.alignment],
+        indentation: Number(settings.indentation),
+      });
+      const convertedBuffer = bytes.slice().buffer;
+      const convertedAnalysis = await analyzeHwpx(convertedBuffer);
+      setConvertedFile({
+        bytes,
+        analysis: convertedAnalysis,
+        fileName: `${fileName.replace(/\.hwpx$/i, "")}_서식변경.hwpx`,
+      });
+    } catch (error) {
+      setApplyError(
+        error instanceof Error ? error.message : "서식을 변경하는 중 오류가 발생했습니다.",
+      );
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const downloadConvertedFile = () => {
+    if (!convertedFile) return;
+    const url = URL.createObjectURL(
+      new Blob([convertedFile.bytes], { type: "application/hwp+zip" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = convertedFile.fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const alignmentLabels: Record<string, string> = {
+    LEFT: "왼쪽",
+    CENTER: "가운데",
+    RIGHT: "오른쪽",
+    JUSTIFY: "양쪽",
+    DISTRIBUTE: "배분",
+  };
+
+  const analysisStatus = analyzing
+    ? "문서 내부 XML을 분석하고 있어요."
+    : analysis
+      ? `XML 분석 완료 · ${analysis.styles.paragraphCount.toLocaleString()}개 문단 · ${analysis.styles.characterCount.toLocaleString()}자`
+      : fileName
+        ? `${fileSize} · 파일 선택 완료`
+        : "파일을 이곳에 끌어 놓거나 직접 선택하세요. HWPX 형식만 지원합니다.";
+
+  const activeAnalysis = convertedFile?.analysis ?? analysis;
+
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,_#dbeafe_0,_transparent_28%),linear-gradient(#f8fafc,#eef4fb)] text-slate-950">
       <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur">
@@ -220,15 +332,21 @@ export default function Home() {
             </p>
           </div>
           <ol className="flex items-center gap-2 text-sm font-semibold text-slate-500" aria-label="작업 단계">
-            {["파일 선택", "서식 설정", "변경 완료"].map((step, index) => (
-              <li key={step} className="flex items-center gap-2">
-                <span className={`grid size-7 place-items-center rounded-full ${index === 0 ? "bg-blue-600 text-white" : "bg-white text-slate-500 ring-1 ring-slate-200"}`}>
-                  {index + 1}
-                </span>
-                <span className="hidden sm:inline">{step}</span>
-                {index < 2 && <ChevronRight className="size-4 text-slate-300" aria-hidden="true" />}
-              </li>
-            ))}
+            {["파일 선택", "XML 분석", "서식 설정", "변경 완료"].map((step, index) => {
+              const active = index === 0
+                || (index === 1 && (analyzing || Boolean(analysis)))
+                || (index === 2 && Boolean(analysis))
+                || (index === 3 && Boolean(convertedFile));
+              return (
+                <li key={step} className="flex items-center gap-2">
+                  <span className={`grid size-7 place-items-center rounded-full ${active ? "bg-blue-600 text-white" : "bg-white text-slate-500 ring-1 ring-slate-200"}`}>
+                    {index + 1}
+                  </span>
+                  <span className="hidden sm:inline">{step}</span>
+                  {index < 3 && <ChevronRight className="size-4 text-slate-300" aria-hidden="true" />}
+                </li>
+              );
+            })}
           </ol>
         </section>
 
@@ -259,15 +377,24 @@ export default function Home() {
           />
           <div className="flex flex-col items-center gap-5 text-center sm:flex-row sm:text-left">
             <div className="grid size-16 shrink-0 place-items-center rounded-2xl bg-blue-50 text-blue-600 ring-1 ring-blue-100">
-              {fileName ? <Check className="size-7" /> : <UploadCloud className="size-7" />}
+              {analyzing ? (
+                <LoaderCircle className="size-7 animate-spin" />
+              ) : analysis ? (
+                <Check className="size-7" />
+              ) : fileError ? (
+                <AlertCircle className="size-7 text-red-500" />
+              ) : (
+                <UploadCloud className="size-7" />
+              )}
             </div>
             <div className="min-w-0 flex-1">
               <h2 className="text-xl font-extrabold tracking-tight">
                 {fileName ?? "변경할 HWPX 파일을 올려주세요"}
               </h2>
               <p className={`mt-1 text-sm ${fileError ? "font-semibold text-red-600" : "text-slate-500"}`}>
-                {fileError ?? (fileName ? `${fileSize} · 파일 선택 완료` : "파일을 이곳에 끌어 놓거나 직접 선택하세요. HWPX 형식만 지원합니다.")}
+                {fileError ?? analysisStatus}
               </p>
+              <p className="mt-2 text-xs text-slate-400">분석은 현재 브라우저 안에서만 진행되며 파일은 서버로 전송되지 않습니다.</p>
             </div>
             <Button
               type="button"
@@ -300,11 +427,12 @@ export default function Home() {
 
               <div className="space-y-2">
                 <p className="text-sm font-semibold text-slate-700">문단 정렬</p>
-                <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-100 p-1.5">
+                <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5 sm:grid-cols-4">
                   {[
                     ["왼쪽", AlignLeft],
                     ["가운데", AlignCenter],
                     ["오른쪽", AlignRight],
+                    ["양쪽", AlignJustify],
                   ].map(([label, Icon]) => (
                     <button
                       key={label as string}
@@ -324,11 +452,34 @@ export default function Home() {
                   <RotateCcw className="size-4" />
                   초기화
                 </Button>
-                <Button type="button" className="h-11 rounded-xl bg-blue-600 px-6 hover:bg-blue-700" disabled={!fileName}>
-                  서식 적용하기
-                  <ChevronRight className="size-4" />
+                <Button
+                  type="button"
+                  className="h-11 rounded-xl bg-blue-600 px-6 hover:bg-blue-700"
+                  disabled={!analysis || !originalBuffer || applying}
+                  onClick={applyFormatting}
+                >
+                  {applying ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : convertedFile ? (
+                    <Check className="size-4" />
+                  ) : (
+                    <ChevronRight className="size-4" />
+                  )}
+                  {applying ? "서식 적용 중" : convertedFile ? "적용 완료" : "서식 적용하기"}
                 </Button>
               </div>
+              {applyError && (
+                <div className="flex items-start gap-2 rounded-2xl bg-red-50 p-4 text-sm font-semibold text-red-700">
+                  <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                  {applyError}
+                </div>
+              )}
+              {convertedFile && (
+                <div className="flex items-start gap-2 rounded-2xl bg-emerald-50 p-4 text-sm font-semibold text-emerald-700">
+                  <Check className="mt-0.5 size-4 shrink-0" />
+                  서식 변경이 완료되었습니다. 아래 다운로드 버튼으로 새 파일을 저장할 수 있습니다.
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -366,40 +517,104 @@ export default function Home() {
         <section className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_18px_50px_-35px_rgba(15,23,42,0.35)]">
           <div className="flex flex-col gap-3 border-b border-slate-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-xl font-extrabold tracking-tight">변경 완료</h2>
-              <p className="mt-1 text-sm text-slate-500">서식을 적용하면 문서 미리보기와 변경 요약이 이곳에 표시됩니다.</p>
+              <h2 className="text-xl font-extrabold tracking-tight">
+                {convertedFile ? "서식 변경 결과" : "문서 분석 결과"}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {convertedFile
+                  ? "변경된 HWPX를 다시 분석해 실제 적용 결과를 확인했습니다."
+                  : analysis
+                    ? "HWPX 내부 XML에서 추출한 본문과 주요 서식입니다."
+                    : "파일을 선택하면 추출한 본문과 주요 서식이 이곳에 표시됩니다."}
+              </p>
             </div>
-            <Button type="button" variant="outline" className="rounded-xl" disabled>
+            <Button
+              type="button"
+              variant="outline"
+              className="rounded-xl"
+              disabled={!convertedFile}
+              onClick={downloadConvertedFile}
+            >
               <Download className="size-4" />
               HWPX 다운로드
             </Button>
           </div>
-          <div className="grid gap-6 bg-slate-50/70 p-6 lg:grid-cols-[1.2fr_0.8fr]">
-            <div className="grid min-h-80 place-items-center rounded-2xl border border-slate-200 bg-slate-100 p-6">
-              <div className="aspect-[1/1.414] h-64 rounded-sm bg-white p-7 shadow-[0_8px_30px_rgba(15,23,42,0.12)]">
-                <div className="h-2 w-1/3 rounded bg-blue-500" />
-                <div className="mt-5 h-4 w-3/4 rounded bg-slate-800" />
-                <div className="mt-2 h-2 w-1/2 rounded bg-slate-300" />
-                <div className="mt-8 space-y-2">
-                  {["100%", "92%", "96%", "83%", "90%", "72%"].map((width) => (
-                    <div key={width} className="h-1.5 rounded bg-slate-200" style={{ width }} />
-                  ))}
+          {activeAnalysis ? (
+            <div className="grid gap-6 bg-slate-50/70 p-6 lg:grid-cols-[1.25fr_0.75fr]">
+              <article className="min-h-96 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <div className="mb-5 flex items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                  <div>
+                    <h3 className="font-extrabold text-slate-900">추출된 문서 내용</h3>
+                    <p className="mt-1 text-xs text-slate-500">표 안의 내용도 문서 순서대로 포함됩니다.</p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">
+                    {activeAnalysis.styles.paragraphCount.toLocaleString()}개 문단
+                  </span>
                 </div>
+                <div className="max-h-[34rem] overflow-y-auto whitespace-pre-wrap pr-3 text-sm leading-7 text-slate-700">
+                  {activeAnalysis.text}
+                </div>
+              </article>
+
+              <aside className="space-y-4">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                  <h3 className="font-extrabold text-slate-900">문서 정보</h3>
+                  <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
+                    {[
+                      ["구역", activeAnalysis.styles.sectionCount.toLocaleString()],
+                      ["문단", activeAnalysis.styles.paragraphCount.toLocaleString()],
+                      ["글자", activeAnalysis.styles.characterCount.toLocaleString()],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-xl bg-slate-50 px-2 py-3">
+                        <dd className="text-lg font-black text-slate-900">{value}</dd>
+                        <dt className="mt-1 text-xs text-slate-500">{label}</dt>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+
+                {[
+                  ["주요 글꼴", activeAnalysis.styles.fonts.slice(0, 4)],
+                  ["글자 크기", activeAnalysis.styles.fontSizes.slice(0, 4)],
+                  ["문단 정렬", activeAnalysis.styles.alignments.slice(0, 4).map((item) => ({ ...item, label: alignmentLabels[item.label] ?? item.label }))],
+                  ["줄 간격", activeAnalysis.styles.lineSpacings.slice(0, 4)],
+                  ["들여쓰기", activeAnalysis.styles.indentations.slice(0, 4)],
+                ].map(([title, items]) => (
+                  <div key={title as string} className="rounded-2xl border border-slate-200 bg-white p-5">
+                    <h3 className="text-sm font-extrabold text-slate-900">{title as string}</h3>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {(items as { label: string; count: number }[]).length > 0 ? (
+                        (items as { label: string; count: number }[]).map((item) => (
+                          <span key={item.label} className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800">
+                            {item.label} <span className="text-blue-500">· {item.count.toLocaleString()}</span>
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-xs text-slate-400">감지된 정보 없음</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-6 text-blue-800">
+                  굵게 서식이 적용된 글자 <strong>{activeAnalysis.styles.boldCharacters.toLocaleString()}자</strong>를 감지했습니다.
+                  {changedCount > 0 && ` 현재 ${changedCount}개 서식 설정을 기본값에서 변경했습니다.`}
+                </div>
+              </aside>
+            </div>
+          ) : (
+            <div className="grid min-h-80 place-items-center bg-slate-50/70 p-6 text-center">
+              <div>
+                <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-blue-50 text-blue-600">
+                  {analyzing ? <LoaderCircle className="size-5 animate-spin" /> : <FileText className="size-5" />}
+                </div>
+                <h3 className="mt-4 text-lg font-extrabold">{analyzing ? "XML 분석 중" : "분석할 문서가 없습니다"}</h3>
+                <p className="mt-2 text-sm text-slate-500">
+                  {analyzing ? "문서 크기에 따라 잠시 시간이 걸릴 수 있습니다." : "상단에서 HWPX 파일을 선택해 주세요."}
+                </p>
               </div>
             </div>
-            <div className="flex min-h-80 flex-col justify-center rounded-2xl border border-slate-200 bg-white p-6">
-              <div className="grid size-11 place-items-center rounded-xl bg-blue-50 text-blue-600">
-                <FileText className="size-5" />
-              </div>
-              <h3 className="mt-5 text-lg font-extrabold">변경 내용 요약</h3>
-              <p className="mt-1 text-sm leading-6 text-slate-500">
-                {changedCount > 0 ? `${changedCount}개 서식 항목을 기본값에서 변경했습니다.` : "아직 기본값에서 변경된 서식이 없습니다."}
-              </p>
-              <div className="mt-5 rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">
-                {fileName ? `${fileName} 문서에 선택한 설정을 적용할 준비가 되었습니다.` : "먼저 상단에서 HWPX 파일을 선택해 주세요."}
-              </div>
-            </div>
-          </div>
+          )}
         </section>
       </div>
     </main>
