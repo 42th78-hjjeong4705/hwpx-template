@@ -42,6 +42,7 @@ import {
   type ParagraphStyleAssignments,
   type ParagraphStylePreset,
 } from "@/lib/hwpx-parser";
+import WorkflowPage from "./workflow-page";
 
 const initialStyleSettings = {
   heading: {
@@ -104,7 +105,7 @@ function SettingSelect({
   );
 }
 
-export default function Home() {
+function LegacyHome() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileSize, setFileSize] = useState<string | null>(null);
@@ -266,8 +267,8 @@ export default function Home() {
   const activeAnalysis = convertedFile?.analysis ?? analysis;
   const activeSettings = styleSettings[activeStyle];
   const classificationCounts = Object.values(paragraphAssignments).reduce(
-    (counts, role) => ({ ...counts, [role]: counts[role] + 1 }),
-    { heading: 0, body: 0 } as Record<ParagraphRole, number>,
+    (counts, role) => ({ ...counts, [role]: (counts[role] ?? 0) + 1 }),
+    { heading: 0, body: 0 } as Record<string, number>,
   );
 
   return (
@@ -678,3 +679,5 @@ export default function Home() {
     </main>
   );
 }
+
+export default WorkflowPage;

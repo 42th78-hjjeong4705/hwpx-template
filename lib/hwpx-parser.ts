@@ -48,7 +48,7 @@ export type ParagraphStylePreset = HwpxFormatSettings & {
   bold: boolean;
 };
 
-export type ParagraphStyleAssignments = Record<string, ParagraphRole>;
+export type ParagraphStyleAssignments = Record<string, string>;
 
 type CharacterStyle = {
   fontName?: string;
@@ -447,7 +447,7 @@ function setBoldProperty(document: Document, characterProperty: Element, bold: b
 
 export function formatHwpxByParagraphStyles(
   buffer: ArrayBuffer,
-  presets: Record<ParagraphRole, ParagraphStylePreset>,
+  presets: Record<string, ParagraphStylePreset>,
   assignments: ParagraphStyleAssignments,
 ) {
   let archive: Record<string, Uint8Array>;
@@ -502,9 +502,9 @@ export function formatHwpxByParagraphStyles(
     SYMBOL: "symbol",
     USER: "user",
   };
-  const fontIdsByPreset = new Map<ParagraphRole, Map<string, string>>();
+  const fontIdsByPreset = new Map<string, Map<string, string>>();
 
-  (["heading", "body"] as const).forEach((role) => {
+  Object.keys(presets).forEach((role) => {
     const fontIds = new Map<string, string>();
     elements(header, "fontface").forEach((fontFace) => {
       const language = fontFace.getAttribute("lang")?.toUpperCase();
@@ -533,7 +533,7 @@ export function formatHwpxByParagraphStyles(
   const characterPropertyCache = new Map<string, string>();
   const paragraphPropertyCache = new Map<string, string>();
 
-  const characterPropertyFor = (sourceId: string, role: ParagraphRole) => {
+  const characterPropertyFor = (sourceId: string, role: string) => {
     const cacheKey = `${role}:${sourceId}`;
     const cached = characterPropertyCache.get(cacheKey);
     if (cached) return cached;
@@ -554,7 +554,7 @@ export function formatHwpxByParagraphStyles(
     return nextId;
   };
 
-  const paragraphPropertyFor = (sourceId: string, role: ParagraphRole) => {
+  const paragraphPropertyFor = (sourceId: string, role: string) => {
     const cacheKey = `${role}:${sourceId}`;
     const cached = paragraphPropertyCache.get(cacheKey);
     if (cached) return cached;
@@ -582,7 +582,7 @@ export function formatHwpxByParagraphStyles(
     const section = parseXml(archive[fileName], fileName);
     elements(section, "p").forEach((paragraph, paragraphIndex) => {
       const role = assignments[`${fileName}:${paragraphIndex}`];
-      if (!role) return;
+      if (!role || !presets[role]) return;
       paragraph.setAttribute(
         "paraPrIDRef",
         paragraphPropertyFor(paragraph.getAttribute("paraPrIDRef") ?? "", role),
