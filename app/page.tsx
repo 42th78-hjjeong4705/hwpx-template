@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   AlertCircle,
   AlignCenter,
@@ -35,43 +35,37 @@ import {
 } from "@/components/ui/select";
 import {
   analyzeHwpx,
-  formatHwpx,
+  formatHwpxByParagraphStyles,
   type HwpxAnalysis,
   type HwpxFormatSettings,
+  type ParagraphRole,
+  type ParagraphStyleAssignments,
+  type ParagraphStylePreset,
 } from "@/lib/hwpx-parser";
 
-const initialSettings = {
-  font: "본고딕",
-  fontSize: "11",
-  lineSpacing: "160",
-  alignment: "왼쪽",
-  indentation: "0",
+const initialStyleSettings = {
+  heading: {
+    font: "본고딕",
+    fontSize: "14",
+    lineSpacing: "160",
+    alignment: "왼쪽",
+    indentation: "0",
+    bold: true,
+  },
+  body: {
+    font: "함초롬바탕",
+    fontSize: "11",
+    lineSpacing: "160",
+    alignment: "양쪽",
+    indentation: "0",
+    bold: false,
+  },
 };
 
-type Settings = typeof initialSettings;
-
-type ModelContext = {
-  registerTool: (
-    tool: {
-      name: string;
-      title: string;
-      description: string;
-      inputSchema: object;
-      annotations: { readOnlyHint: boolean; untrustedContentHint: boolean };
-      execute: (input: unknown) => unknown;
-    },
-    options?: { signal?: AbortSignal },
-  ) => void | Promise<void>;
-};
-
-declare global {
-  interface Document {
-    readonly modelContext?: ModelContext;
-  }
-}
+type StyleSettings = (typeof initialStyleSettings)[ParagraphRole];
 
 const selectOptions = {
-  font: ["본고딕", "맑은 고딕", "함초롬바탕", "나눔명조"],
+  font: ["본고딕", "맑은 고딕", "함초롬돋움", "함초롬바탕", "나눔명조"],
   fontSize: ["9", "10", "11", "12", "14", "16"],
   lineSpacing: ["130", "150", "160", "180", "200"],
   indentation: ["0", "5", "10", "15", "20"],
@@ -126,10 +120,15 @@ export default function Home() {
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [settings, setSettings] = useState<Settings>(initialSettings);
+  const [styleSettings, setStyleSettings] = useState(initialStyleSettings);
+  const [activeStyle, setActiveStyle] = useState<ParagraphRole>("heading");
+  const [paragraphAssignments, setParagraphAssignments] = useState<ParagraphStyleAssignments>({});
 
-  const updateSetting = (key: keyof Settings, value: string) => {
-    setSettings((current) => ({ ...current, [key]: value }));
+  const updateStyle = (key: keyof StyleSettings, value: string | boolean) => {
+    setStyleSettings((current) => ({
+      ...current,
+      [activeStyle]: { ...current[activeStyle], [key]: value },
+    }));
     setConvertedFile(null);
     setApplyError(null);
   };
@@ -141,6 +140,7 @@ export default function Home() {
       setAnalysis(null);
       setOriginalBuffer(null);
       setConvertedFile(null);
+      setParagraphAssignments({});
       return;
     }
     setFileName(file.name);
@@ -149,12 +149,17 @@ export default function Home() {
     setAnalysis(null);
     setOriginalBuffer(null);
     setConvertedFile(null);
+    setParagraphAssignments({});
     setApplyError(null);
     setAnalyzing(true);
     try {
       const buffer = await file.arrayBuffer();
       setOriginalBuffer(buffer);
-      setAnalysis(await analyzeHwpx(buffer));
+      const result = await analyzeHwpx(buffer);
+      setAnalysis(result);
+      setParagraphAssignments(
+        Object.fromEntries(result.paragraphDetails.map((paragraph) => [paragraph.id, paragraph.suggestedRole])),
+      );
     } catch (error) {
       setFileError(
         error instanceof Error ? error.message : "HWPX 문서를 분석하는 중 오류가 발생했습니다.",
@@ -165,7 +170,9 @@ export default function Home() {
   };
 
   const resetAll = () => {
-    setSettings(initialSettings);
+    setStyleSettings(initialStyleSettings);
+    setActiveStyle("heading");
+    setParagraphAssignments({});
     setFileName(null);
     setFileSize(null);
     setFileError(null);
@@ -178,81 +185,32 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  useEffect(() => {
-    const context = document.modelContext;
-    if (!context?.registerTool) return;
-
-    const lifecycle = new AbortController();
-    const allowedValues = {
-      font: selectOptions.font,
-      fontSize: selectOptions.fontSize,
-      lineSpacing: selectOptions.lineSpacing,
-      alignment: ["왼쪽", "가운데", "오른쪽", "양쪽"],
-      indentation: selectOptions.indentation,
-    } as const;
-
-    void Promise.resolve(
-      context.registerTool(
-        {
-          name: "configure_document_format",
-          title: "문서 서식 설정",
-          description:
-            "현재 화면의 글꼴, 글자 크기, 줄 간격, 문단 정렬, 들여쓰기 값을 설정합니다.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              font: { type: "string", enum: allowedValues.font },
-              fontSize: { type: "string", enum: allowedValues.fontSize },
-              lineSpacing: { type: "string", enum: allowedValues.lineSpacing },
-              alignment: { type: "string", enum: allowedValues.alignment },
-              indentation: { type: "string", enum: allowedValues.indentation },
-            },
-            additionalProperties: false,
-          },
-          annotations: { readOnlyHint: false, untrustedContentHint: false },
-          execute(input) {
-            if (!input || typeof input !== "object" || Array.isArray(input)) {
-              throw new Error("서식 설정은 객체 형태여야 합니다.");
-            }
-            const next = input as Partial<Settings>;
-            const invalid = Object.entries(next).find(([key, value]) => {
-              const values = allowedValues[key as keyof Settings];
-              return typeof value !== "string" || !values.includes(value as never);
-            });
-            if (invalid) throw new Error(`지원하지 않는 ${invalid[0]} 값입니다.`);
-            setSettings((current) => ({ ...current, ...next }));
-            return { status: "configured", settings: { ...settings, ...next } };
-          },
-        },
-        { signal: lifecycle.signal },
-      ),
-    ).catch(() => undefined);
-
-    return () => lifecycle.abort();
-  }, [settings]);
-
-  const changedCount = Object.entries(settings).filter(
-    ([key, value]) => value !== initialSettings[key as keyof Settings],
-  ).length;
-
   const applyFormatting = async () => {
     if (!originalBuffer || !analysis || !fileName) return;
     setApplying(true);
     setApplyError(null);
     try {
-      const alignmentMap: Record<Settings["alignment"], HwpxFormatSettings["alignment"]> = {
+      const alignmentMap: Record<string, HwpxFormatSettings["alignment"]> = {
         왼쪽: "LEFT",
         가운데: "CENTER",
         오른쪽: "RIGHT",
         양쪽: "JUSTIFY",
       };
-      const bytes = formatHwpx(originalBuffer, {
-        font: settings.font,
-        fontSize: Number(settings.fontSize),
-        lineSpacing: Number(settings.lineSpacing),
-        alignment: alignmentMap[settings.alignment],
-        indentation: Number(settings.indentation),
-      });
+      const presets = Object.fromEntries(
+        (["heading", "body"] as const).map((role) => {
+          const style = styleSettings[role];
+          const preset: ParagraphStylePreset = {
+            font: style.font,
+            fontSize: Number(style.fontSize),
+            lineSpacing: Number(style.lineSpacing),
+            alignment: alignmentMap[style.alignment],
+            indentation: Number(style.indentation),
+            bold: style.bold,
+          };
+          return [role, preset];
+        }),
+      ) as Record<ParagraphRole, ParagraphStylePreset>;
+      const bytes = formatHwpxByParagraphStyles(originalBuffer, presets, paragraphAssignments);
       const convertedBuffer = bytes.slice().buffer;
       const convertedAnalysis = await analyzeHwpx(convertedBuffer);
       setConvertedFile({
@@ -267,6 +225,12 @@ export default function Home() {
     } finally {
       setApplying(false);
     }
+  };
+
+  const updateParagraphRole = (id: string, role: ParagraphRole) => {
+    setParagraphAssignments((current) => ({ ...current, [id]: role }));
+    setConvertedFile(null);
+    setApplyError(null);
   };
 
   const downloadConvertedFile = () => {
@@ -300,6 +264,11 @@ export default function Home() {
         : "파일을 이곳에 끌어 놓거나 직접 선택하세요. HWPX 형식만 지원합니다.";
 
   const activeAnalysis = convertedFile?.analysis ?? analysis;
+  const activeSettings = styleSettings[activeStyle];
+  const classificationCounts = Object.values(paragraphAssignments).reduce(
+    (counts, role) => ({ ...counts, [role]: counts[role] + 1 }),
+    { heading: 0, body: 0 } as Record<ParagraphRole, number>,
+  );
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,_#dbeafe_0,_transparent_28%),linear-gradient(#f8fafc,#eef4fb)] text-slate-950">
@@ -413,16 +382,49 @@ export default function Home() {
             <CardHeader className="border-b border-slate-100 pb-5">
               <CardTitle className="flex items-center gap-2 text-xl font-extrabold">
                 <Sparkles className="size-5 text-blue-600" />
-                서식 설정
+                스타일 설정
               </CardTitle>
-              <CardDescription>문서 전체에 적용할 기본 서식을 선택하세요.</CardDescription>
+              <CardDescription>소제목과 본문 스타일만 정하면 문단에 자동으로 적용됩니다.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6 pt-1">
+              <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5">
+                {([
+                  ["heading", "스타일 1 · 소제목", classificationCounts.heading],
+                  ["body", "스타일 2 · 본문", classificationCounts.body],
+                ] as const).map(([role, label, count]) => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => setActiveStyle(role)}
+                    className={`rounded-xl px-3 py-3 text-left transition ${activeStyle === role ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
+                  >
+                    <span className="block text-sm font-extrabold">{label}</span>
+                    <span className="mt-0.5 block text-xs">{analysis ? `${count}개 문단` : "파일 분석 후 자동 분류"}</span>
+                  </button>
+                ))}
+              </div>
+
               <div className="grid gap-5 sm:grid-cols-2">
-                <SettingSelect label="글꼴" value={settings.font} options={selectOptions.font} onValueChange={(value) => updateSetting("font", value)} />
-                <SettingSelect label="글자 크기" value={settings.fontSize} options={selectOptions.fontSize} suffix="pt" onValueChange={(value) => updateSetting("fontSize", value)} />
-                <SettingSelect label="줄 간격" value={settings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updateSetting("lineSpacing", value)} />
-                <SettingSelect label="들여쓰기" value={settings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updateSetting("indentation", value)} />
+                <SettingSelect label="글꼴" value={activeSettings.font} options={selectOptions.font} onValueChange={(value) => updateStyle("font", value)} />
+                <SettingSelect label="글자 크기" value={activeSettings.fontSize} options={selectOptions.fontSize} suffix="pt" onValueChange={(value) => updateStyle("fontSize", value)} />
+                <SettingSelect label="줄 간격" value={activeSettings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updateStyle("lineSpacing", value)} />
+                <SettingSelect label="들여쓰기" value={activeSettings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updateStyle("indentation", value)} />
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-semibold text-slate-700">글자 굵기</p>
+                <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5">
+                  {[false, true].map((bold) => (
+                    <button
+                      key={String(bold)}
+                      type="button"
+                      onClick={() => updateStyle("bold", bold)}
+                      className={`h-10 rounded-xl text-sm transition ${activeSettings.bold === bold ? "bg-white font-extrabold text-blue-700 shadow-sm" : "font-semibold text-slate-500"}`}
+                    >
+                      {bold ? "굵게 적용" : "보통 굵기"}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -437,8 +439,8 @@ export default function Home() {
                     <button
                       key={label as string}
                       type="button"
-                      onClick={() => updateSetting("alignment", label as string)}
-                      className={`flex h-10 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${settings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
+                      onClick={() => updateStyle("alignment", label as string)}
+                      className={`flex h-10 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${activeSettings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
                     >
                       <Icon className="size-4" />
                       {label as string}
@@ -465,7 +467,7 @@ export default function Home() {
                   ) : (
                     <ChevronRight className="size-4" />
                   )}
-                  {applying ? "서식 적용 중" : convertedFile ? "적용 완료" : "서식 적용하기"}
+                  {applying ? "스타일 적용 중" : convertedFile ? "적용 완료" : "두 스타일 자동 적용"}
                 </Button>
               </div>
               {applyError && (
@@ -486,33 +488,89 @@ export default function Home() {
           <aside className="space-y-6">
             <Card className="rounded-3xl border-slate-200 bg-slate-950 text-white shadow-xl shadow-slate-300/40">
               <CardHeader>
-                <CardTitle className="text-lg">현재 설정</CardTitle>
-                <CardDescription className="text-slate-400">변경 전 선택 내용을 확인하세요.</CardDescription>
+                <CardTitle className="text-lg">자동 분류 요약</CardTitle>
+                <CardDescription className="text-slate-400">파일을 읽으면 문단 역할을 자동으로 나눕니다.</CardDescription>
               </CardHeader>
-              <CardContent>
-                <dl className="space-y-3 text-sm">
-                  {[
-                    ["글꼴", settings.font],
-                    ["글자 크기", `${settings.fontSize}pt`],
-                    ["줄 간격", `${settings.lineSpacing}%`],
-                    ["문단 정렬", settings.alignment],
-                    ["들여쓰기", `${settings.indentation}pt`],
-                  ].map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between border-b border-slate-800 pb-3 last:border-0 last:pb-0">
-                      <dt className="text-slate-400">{label}</dt>
-                      <dd className="font-semibold">{value}</dd>
+              <CardContent className="space-y-3">
+                {([
+                  ["heading", "스타일 1 · 소제목", "bg-blue-500"],
+                  ["body", "스타일 2 · 본문", "bg-emerald-500"],
+                ] as const).map(([role, label, color]) => {
+                  const style = styleSettings[role];
+                  return (
+                    <div key={role} className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <span className={`size-2 rounded-full ${color}`} />
+                          <p className="text-sm font-extrabold">{label}</p>
+                        </div>
+                        <span className="text-xs font-bold text-slate-400">{classificationCounts[role]}개</span>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-slate-400">
+                        {style.font} · {style.fontSize}pt · {style.bold ? "굵게" : "보통"}<br />
+                        {style.alignment} · 줄 간격 {style.lineSpacing}% · 들여쓰기 {style.indentation}pt
+                      </p>
                     </div>
-                  ))}
-                </dl>
+                  );
+                })}
               </CardContent>
             </Card>
 
             <div className="rounded-3xl border border-blue-200 bg-blue-50 p-5">
               <p className="text-sm font-bold text-blue-900">원본 파일은 그대로 유지됩니다</p>
-              <p className="mt-1 text-sm leading-6 text-blue-700">완료 후 변경된 문서를 새 HWPX 파일로 내려받게 됩니다.</p>
+              <p className="mt-1 text-sm leading-6 text-blue-700">한 문단이 하나 또는 여러 글자 구간으로 구성돼도 문단 전체에 선택한 스타일을 적용합니다.</p>
             </div>
           </aside>
         </div>
+
+        {analysis && (
+          <section className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_18px_50px_-35px_rgba(15,23,42,0.35)]">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-lg font-extrabold tracking-tight">문단 역할 자동 분류</h2>
+                <p className="mt-1 text-sm text-slate-500">바로 적용해도 되고, 잘못 분류된 문단만 선택적으로 수정할 수 있습니다.</p>
+              </div>
+              <div className="flex gap-2 text-xs font-bold">
+                <span className="rounded-full bg-blue-50 px-3 py-1.5 text-blue-700">소제목 {classificationCounts.heading}개</span>
+                <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">본문 {classificationCounts.body}개</span>
+              </div>
+            </div>
+            <details className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/70">
+              <summary className="cursor-pointer px-5 py-4 text-sm font-bold text-slate-700">분류 결과 확인 및 수정 <span className="font-normal text-slate-400">(선택 사항)</span></summary>
+              <div className="max-h-96 space-y-2 overflow-y-auto border-t border-slate-200 p-3">
+                {analysis.paragraphDetails.map((paragraph, index) => {
+                  const role = paragraphAssignments[paragraph.id] ?? paragraph.suggestedRole;
+                  return (
+                    <div key={paragraph.id} className="flex flex-col gap-3 rounded-xl bg-white p-3 ring-1 ring-slate-200 sm:flex-row sm:items-center">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-slate-700"><span className="mr-2 text-slate-400">{index + 1}</span>{paragraph.text}</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {paragraph.styleName ? `원본 스타일: ${paragraph.styleName}` : "원본 스타일 이름 없음"}
+                          {paragraph.inTable && " · 표 안 문단"}
+                        </p>
+                      </div>
+                      <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
+                        {([
+                          ["heading", "소제목"],
+                          ["body", "본문"],
+                        ] as const).map(([candidate, label]) => (
+                          <button
+                            key={candidate}
+                            type="button"
+                            onClick={() => updateParagraphRole(paragraph.id, candidate)}
+                            className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${role === candidate ? (candidate === "heading" ? "bg-blue-600 text-white" : "bg-emerald-600 text-white") : "text-slate-500"}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          </section>
+        )}
 
         <section className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_18px_50px_-35px_rgba(15,23,42,0.35)]">
           <div className="flex flex-col gap-3 border-b border-slate-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
@@ -598,7 +656,7 @@ export default function Home() {
 
                 <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-6 text-blue-800">
                   굵게 서식이 적용된 글자 <strong>{activeAnalysis.styles.boldCharacters.toLocaleString()}자</strong>를 감지했습니다.
-                  {changedCount > 0 && ` 현재 ${changedCount}개 서식 설정을 기본값에서 변경했습니다.`}
+                  {convertedFile && " 소제목과 본문 스타일을 문단 전체에 적용했습니다."}
                 </div>
               </aside>
             </div>

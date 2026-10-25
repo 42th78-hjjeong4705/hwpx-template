@@ -17,9 +17,22 @@ export type HwpxStyleSummary = {
   sectionCount: number;
 };
 
+export type ParagraphRole = "heading" | "body";
+
+export type HwpxParagraphInfo = {
+  id: string;
+  text: string;
+  sectionFile: string;
+  paragraphIndex: number;
+  suggestedRole: ParagraphRole;
+  styleName?: string;
+  inTable: boolean;
+};
+
 export type HwpxAnalysis = {
   text: string;
   paragraphs: string[];
+  paragraphDetails: HwpxParagraphInfo[];
   styles: HwpxStyleSummary;
 };
 
@@ -31,9 +44,16 @@ export type HwpxFormatSettings = {
   indentation: number;
 };
 
+export type ParagraphStylePreset = HwpxFormatSettings & {
+  bold: boolean;
+};
+
+export type ParagraphStyleAssignments = Record<string, ParagraphRole>;
+
 type CharacterStyle = {
   fontName?: string;
   fontSize?: string;
+  fontSizePt?: number;
   bold: boolean;
 };
 
@@ -106,6 +126,44 @@ function sectionOrder(fileName: string) {
   return Number(fileName.match(/section(\d+)\.xml$/i)?.[1] ?? Number.MAX_SAFE_INTEGER);
 }
 
+function classifyParagraph({
+  text,
+  styleName,
+  averageFontSize,
+  dominantFontSize,
+  boldRatio,
+  inTable,
+}: {
+  text: string;
+  styleName?: string;
+  averageFontSize?: number;
+  dominantFontSize?: number;
+  boldRatio: number;
+  inTable: boolean;
+}): ParagraphRole {
+  const normalizedStyleName = styleName?.toLowerCase() ?? "";
+  if (/본문|바탕글|body|normal/.test(normalizedStyleName)) return "body";
+  if (/소제목|제목|개요|heading|title/.test(normalizedStyleName)) return "heading";
+
+  let score = 0;
+  const trimmed = text.trim();
+  if (trimmed.length <= 45) score += 1;
+  if (trimmed.length <= 22) score += 1;
+  if (/^(?:\d+(?:\.\d+)*[.)]?|[가-힣][.)]|[Ⅰ-Ⅻ]+[.)]?|[①-⑳])\s*/.test(trimmed)) score += 2;
+  if (!/[.!?。！？]$/.test(trimmed)) score += 1;
+  if (boldRatio >= 0.6) score += 2;
+  if (
+    averageFontSize !== undefined
+    && dominantFontSize !== undefined
+    && averageFontSize >= dominantFontSize + 0.5
+  ) {
+    score += 2;
+  }
+  if (trimmed.length >= 80) score -= 3;
+  if (inTable) score -= 2;
+  return score >= 3 ? "heading" : "body";
+}
+
 export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
   let archive: Record<string, Uint8Array>;
   try {
@@ -149,8 +207,16 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
       fontSize: Number.isFinite(rawHeight)
         ? `${Number((rawHeight / 100).toFixed(2))}pt`
         : undefined,
+      fontSizePt: Number.isFinite(rawHeight) ? rawHeight / 100 : undefined,
       bold: elements(characterProperty, "bold").length > 0,
     });
+  });
+
+  const styleNames = new Map<string, string>();
+  elements(header, "style").forEach((style) => {
+    const id = style.getAttribute("id");
+    const name = style.getAttribute("name") ?? style.getAttribute("engName");
+    if (id && name) styleNames.set(id, name);
   });
 
   const paragraphStyles = new Map<string, ParagraphStyle>();
@@ -174,6 +240,12 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
   });
 
   const paragraphs: string[] = [];
+  const pendingParagraphDetails: Array<
+    Omit<HwpxParagraphInfo, "suggestedRole"> & {
+      averageFontSize?: number;
+      boldRatio: number;
+    }
+  > = [];
   const fontCounts = new Map<string, number>();
   const fontSizeCounts = new Map<string, number>();
   const alignmentCounts = new Map<string, number>();
@@ -183,7 +255,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
 
   sectionFiles.forEach((fileName) => {
     const section = parseXml(archive[fileName], fileName);
-    elements(section, "p").forEach((paragraph) => {
+    elements(section, "p").forEach((paragraph, paragraphIndex) => {
       const text = directParagraphText(paragraph).trimEnd();
       if (!text.trim()) return;
       paragraphs.push(text);
@@ -193,6 +265,11 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
       addCount(lineSpacingCounts, paragraphStyle?.lineSpacing);
       addCount(indentationCounts, paragraphStyle?.indentation);
 
+      let styledCharacterCount = 0;
+      let boldCharacterCount = 0;
+      let weightedFontSize = 0;
+      let fontSizeCharacterCount = 0;
+
       elements(paragraph, "run")
         .filter((run) => closestAncestor(run, "p") === paragraph)
         .forEach((run) => {
@@ -201,8 +278,29 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
           const style = characterStyles.get(run.getAttribute("charPrIDRef") ?? "");
           addCount(fontCounts, style?.fontName, length);
           addCount(fontSizeCounts, style?.fontSize, length);
-          if (style?.bold) boldCharacters += length;
+          styledCharacterCount += length;
+          if (style?.fontSizePt !== undefined) {
+            weightedFontSize += style.fontSizePt * length;
+            fontSizeCharacterCount += length;
+          }
+          if (style?.bold) {
+            boldCharacters += length;
+            boldCharacterCount += length;
+          }
         });
+
+      pendingParagraphDetails.push({
+        id: `${fileName}:${paragraphIndex}`,
+        text,
+        sectionFile: fileName,
+        paragraphIndex,
+        styleName: styleNames.get(paragraph.getAttribute("styleIDRef") ?? ""),
+        inTable: Boolean(closestAncestor(paragraph, "tc") || closestAncestor(paragraph, "tbl")),
+        averageFontSize: fontSizeCharacterCount > 0
+          ? weightedFontSize / fontSizeCharacterCount
+          : undefined,
+        boldRatio: styledCharacterCount > 0 ? boldCharacterCount / styledCharacterCount : 0,
+      });
     });
   });
 
@@ -216,9 +314,28 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     throw new Error("문서에서 표시할 텍스트를 찾지 못했습니다.");
   }
 
+  const dominantFontSize = Number.parseFloat(sortedCounts(fontSizeCounts)[0]?.label ?? "");
+  const paragraphDetails: HwpxParagraphInfo[] = pendingParagraphDetails.map((paragraph) => ({
+    id: paragraph.id,
+    text: paragraph.text,
+    sectionFile: paragraph.sectionFile,
+    paragraphIndex: paragraph.paragraphIndex,
+    styleName: paragraph.styleName,
+    inTable: paragraph.inTable,
+    suggestedRole: classifyParagraph({
+      text: paragraph.text,
+      styleName: paragraph.styleName,
+      averageFontSize: paragraph.averageFontSize,
+      dominantFontSize: Number.isFinite(dominantFontSize) ? dominantFontSize : undefined,
+      boldRatio: paragraph.boldRatio,
+      inTable: paragraph.inTable,
+    }),
+  }));
+
   return {
     text,
     paragraphs,
+    paragraphDetails,
     styles: {
       fonts: sortedCounts(fontCounts),
       fontSizes: sortedCounts(fontSizeCounts),
@@ -294,5 +411,214 @@ export function formatHwpx(buffer: ArrayBuffer, settings: HwpxFormatSettings) {
     if (fileName !== "mimetype") packaged[fileName] = contents;
   });
 
+  return zipSync(packaged, { level: 6 });
+}
+
+function setBoldProperty(document: Document, characterProperty: Element, bold: boolean) {
+  elements(characterProperty, "bold").forEach((element) => element.remove());
+  if (!bold) return;
+
+  const prefix = characterProperty.prefix ? `${characterProperty.prefix}:bold` : "bold";
+  const boldElement = document.createElementNS(characterProperty.namespaceURI, prefix);
+  const childOrder = [
+    "fontRef",
+    "ratio",
+    "spacing",
+    "relSz",
+    "offset",
+    "italic",
+    "bold",
+    "underline",
+    "strikeout",
+    "outline",
+    "shadow",
+    "emboss",
+    "engrave",
+    "supscript",
+    "subscript",
+  ];
+  const boldOrder = childOrder.indexOf("bold");
+  const insertionPoint = Array.from(characterProperty.children).find((child) => {
+    const childIndex = childOrder.indexOf(child.localName);
+    return childIndex > boldOrder;
+  });
+  characterProperty.insertBefore(boldElement, insertionPoint ?? null);
+}
+
+export function formatHwpxByParagraphStyles(
+  buffer: ArrayBuffer,
+  presets: Record<ParagraphRole, ParagraphStylePreset>,
+  assignments: ParagraphStyleAssignments,
+) {
+  let archive: Record<string, Uint8Array>;
+  try {
+    archive = unzipSync(new Uint8Array(buffer));
+  } catch {
+    throw new Error("파일 압축을 열 수 없습니다. 올바른 HWPX 파일인지 확인해 주세요.");
+  }
+
+  const headerFileName = "Contents/header.xml";
+  const headerFile = archive[headerFileName];
+  const sectionFiles = Object.keys(archive)
+    .filter((name) => /^Contents\/section\d+\.xml$/i.test(name))
+    .sort((a, b) => sectionOrder(a) - sectionOrder(b));
+  if (!headerFile || sectionFiles.length === 0) {
+    throw new Error("HWPX 문서의 서식 또는 문단 XML을 찾지 못했습니다.");
+  }
+
+  const originalHeader = decoder(headerFile);
+  const header = parseXml(headerFile, headerFileName);
+  const characterPropertiesContainer = elements(header, "charProperties")[0];
+  const paragraphPropertiesContainer = elements(header, "paraProperties")[0];
+  if (!characterPropertiesContainer || !paragraphPropertiesContainer) {
+    throw new Error("HWPX 문서의 글자 또는 문단 서식 목록을 찾지 못했습니다.");
+  }
+
+  const characterProperties = new Map(
+    elements(characterPropertiesContainer, "charPr")
+      .filter((element) => element.parentElement === characterPropertiesContainer)
+      .map((element) => [element.getAttribute("id") ?? "", element]),
+  );
+  const paragraphProperties = new Map(
+    elements(paragraphPropertiesContainer, "paraPr")
+      .filter((element) => element.parentElement === paragraphPropertiesContainer)
+      .map((element) => [element.getAttribute("id") ?? "", element]),
+  );
+  let nextCharacterPropertyId = Math.max(
+    -1,
+    ...Array.from(characterProperties.keys(), (id) => Number(id)).filter(Number.isFinite),
+  ) + 1;
+  let nextParagraphPropertyId = Math.max(
+    -1,
+    ...Array.from(paragraphProperties.keys(), (id) => Number(id)).filter(Number.isFinite),
+  ) + 1;
+
+  const fontReferenceAttributes: Record<string, string> = {
+    HANGUL: "hangul",
+    LATIN: "latin",
+    HANJA: "hanja",
+    JAPANESE: "japanese",
+    OTHER: "other",
+    SYMBOL: "symbol",
+    USER: "user",
+  };
+  const fontIdsByPreset = new Map<ParagraphRole, Map<string, string>>();
+
+  (["heading", "body"] as const).forEach((role) => {
+    const fontIds = new Map<string, string>();
+    elements(header, "fontface").forEach((fontFace) => {
+      const language = fontFace.getAttribute("lang")?.toUpperCase();
+      const referenceAttribute = language ? fontReferenceAttributes[language] : undefined;
+      if (!referenceAttribute) return;
+      const fonts = elements(fontFace, "font").filter((font) => font.parentElement === fontFace);
+      let selectedFont = fonts.find((font) => font.getAttribute("face") === presets[role].font);
+      if (!selectedFont && fonts[0]) {
+        selectedFont = fonts[0].cloneNode(true) as Element;
+        const nextFontId = Math.max(
+          -1,
+          ...fonts.map((font) => Number(font.getAttribute("id"))).filter(Number.isFinite),
+        ) + 1;
+        selectedFont.setAttribute("id", String(nextFontId));
+        selectedFont.setAttribute("face", presets[role].font);
+        selectedFont.setAttribute("isEmbedded", "0");
+        fontFace.appendChild(selectedFont);
+        fontFace.setAttribute("fontCnt", String(fonts.length + 1));
+      }
+      const selectedFontId = selectedFont?.getAttribute("id");
+      if (selectedFontId) fontIds.set(referenceAttribute, selectedFontId);
+    });
+    fontIdsByPreset.set(role, fontIds);
+  });
+
+  const characterPropertyCache = new Map<string, string>();
+  const paragraphPropertyCache = new Map<string, string>();
+
+  const characterPropertyFor = (sourceId: string, role: ParagraphRole) => {
+    const cacheKey = `${role}:${sourceId}`;
+    const cached = characterPropertyCache.get(cacheKey);
+    if (cached) return cached;
+    const source = characterProperties.get(sourceId) ?? characterProperties.values().next().value;
+    if (!source) throw new Error("복제할 글자 서식을 찾지 못했습니다.");
+    const clone = source.cloneNode(true) as Element;
+    const nextId = String(nextCharacterPropertyId++);
+    clone.setAttribute("id", nextId);
+    clone.setAttribute("height", String(Math.round(presets[role].fontSize * 100)));
+    const fontReference = elements(clone, "fontRef")[0];
+    fontIdsByPreset.get(role)?.forEach((fontId, attribute) => {
+      fontReference?.setAttribute(attribute, fontId);
+    });
+    setBoldProperty(header, clone, presets[role].bold);
+    characterPropertiesContainer.appendChild(clone);
+    characterProperties.set(nextId, clone);
+    characterPropertyCache.set(cacheKey, nextId);
+    return nextId;
+  };
+
+  const paragraphPropertyFor = (sourceId: string, role: ParagraphRole) => {
+    const cacheKey = `${role}:${sourceId}`;
+    const cached = paragraphPropertyCache.get(cacheKey);
+    if (cached) return cached;
+    const source = paragraphProperties.get(sourceId) ?? paragraphProperties.values().next().value;
+    if (!source) throw new Error("복제할 문단 서식을 찾지 못했습니다.");
+    const clone = source.cloneNode(true) as Element;
+    const nextId = String(nextParagraphPropertyId++);
+    clone.setAttribute("id", nextId);
+    elements(clone, "align")[0]?.setAttribute("horizontal", presets[role].alignment);
+    const lineSpacing = elements(clone, "lineSpacing")[0];
+    lineSpacing?.setAttribute("type", "PERCENT");
+    lineSpacing?.setAttribute("value", String(Math.round(presets[role].lineSpacing)));
+    elements(clone, "intent")[0]?.setAttribute(
+      "value",
+      String(Math.round(presets[role].indentation * 100)),
+    );
+    paragraphPropertiesContainer.appendChild(clone);
+    paragraphProperties.set(nextId, clone);
+    paragraphPropertyCache.set(cacheKey, nextId);
+    return nextId;
+  };
+
+  sectionFiles.forEach((fileName) => {
+    const originalSection = decoder(archive[fileName]);
+    const section = parseXml(archive[fileName], fileName);
+    elements(section, "p").forEach((paragraph, paragraphIndex) => {
+      const role = assignments[`${fileName}:${paragraphIndex}`];
+      if (!role) return;
+      paragraph.setAttribute(
+        "paraPrIDRef",
+        paragraphPropertyFor(paragraph.getAttribute("paraPrIDRef") ?? "", role),
+      );
+      elements(paragraph, "run")
+        .filter((run) => closestAncestor(run, "p") === paragraph)
+        .forEach((run) => {
+          run.setAttribute(
+            "charPrIDRef",
+            characterPropertyFor(run.getAttribute("charPrIDRef") ?? "", role),
+          );
+        });
+    });
+    archive[fileName] = serializeXml(section, originalSection);
+  });
+
+  characterPropertiesContainer.setAttribute(
+    "itemCnt",
+    String(
+      elements(characterPropertiesContainer, "charPr")
+        .filter((element) => element.parentElement === characterPropertiesContainer).length,
+    ),
+  );
+  paragraphPropertiesContainer.setAttribute(
+    "itemCnt",
+    String(
+      elements(paragraphPropertiesContainer, "paraPr")
+        .filter((element) => element.parentElement === paragraphPropertiesContainer).length,
+    ),
+  );
+  archive[headerFileName] = serializeXml(header, originalHeader);
+
+  const packaged: Zippable = {};
+  if (archive.mimetype) packaged.mimetype = [archive.mimetype, { level: 0 }];
+  Object.entries(archive).forEach(([fileName, contents]) => {
+    if (fileName !== "mimetype") packaged[fileName] = contents;
+  });
   return zipSync(packaged, { level: 6 });
 }
