@@ -1,6 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
 import {
   AlertCircle,
   AlignCenter,
@@ -10,12 +11,16 @@ import {
   ArrowLeft,
   Check,
   ChevronRight,
+  Database,
   Download,
   FileText,
   FolderOpen,
   LoaderCircle,
+  LogIn,
+  LogOut,
   Plus,
   RotateCcw,
+  Save,
   Sparkles,
   Trash2,
   UploadCloud,
@@ -23,6 +28,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   analyzeHwpx,
@@ -32,6 +38,7 @@ import {
   type ParagraphStyleAssignments,
   type ParagraphStylePreset,
 } from "@/lib/hwpx-parser";
+import { getSupabaseBrowserClient } from "@/lib/supabase-client";
 
 type WorkflowStep = "upload" | "format" | "result";
 
@@ -49,6 +56,14 @@ type DocumentStyle = {
   name: string;
   colorIndex: number;
   settings: StyleSettings;
+};
+
+type StoredStylePreset = {
+  id: string;
+  user_id: string;
+  name: string;
+  styles: unknown;
+  updated_at: string;
 };
 
 const initialStyles: DocumentStyle[] = [
@@ -90,6 +105,26 @@ const alignmentLabels: Record<string, string> = {
   DISTRIBUTE: "배분",
 };
 
+function readStoredStyles(value: unknown): DocumentStyle[] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const valid = value.every((style) => {
+    if (!style || typeof style !== "object") return false;
+    const candidate = style as Partial<DocumentStyle>;
+    const settings = candidate.settings as Partial<StyleSettings> | undefined;
+    return typeof candidate.id === "string"
+      && typeof candidate.name === "string"
+      && typeof candidate.colorIndex === "number"
+      && Boolean(settings)
+      && typeof settings?.font === "string"
+      && typeof settings.fontSize === "string"
+      && typeof settings.lineSpacing === "string"
+      && typeof settings.alignment === "string"
+      && typeof settings.indentation === "string"
+      && typeof settings.bold === "boolean";
+  });
+  return valid ? value as DocumentStyle[] : null;
+}
+
 function SettingSelect({ label, value, options, suffix, onValueChange }: {
   label: string;
   value: string;
@@ -127,6 +162,20 @@ export default function WorkflowPage() {
   const [applying, setApplying] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [storedPresets, setStoredPresets] = useState<StoredStylePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [presetsBusy, setPresetsBusy] = useState(false);
+  const [presetMessage, setPresetMessage] = useState<string | null>(null);
+
+  const supabase = getSupabaseBrowserClient();
 
   const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0];
   const selectedParagraph = analysis?.paragraphDetails.find((paragraph) => paragraph.id === selectedParagraphId);
@@ -136,7 +185,166 @@ export default function WorkflowPage() {
     return counts;
   }, {});
 
+  const refreshStoredPresets = async (userId?: string) => {
+    if (!supabase || !userId) {
+      setStoredPresets([]);
+      return;
+    }
+    setPresetsBusy(true);
+    const { data, error } = await supabase
+      .from("style_presets")
+      .select("id,user_id,name,styles,updated_at")
+      .eq("user_id", userId)
+      .order("updated_at", { ascending: false });
+    setPresetsBusy(false);
+    if (error) {
+      setPresetMessage(`스타일 목록을 불러오지 못했습니다: ${error.message}`);
+      return;
+    }
+    setStoredPresets((data ?? []) as StoredStylePreset[]);
+  };
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthReady(true);
+      return;
+    }
+
+    let mounted = true;
+    void supabase.auth.getUser().then(({ data }) => {
+      if (!mounted) return;
+      setCurrentUser(data.user);
+      setAuthReady(true);
+      void refreshStoredPresets(data.user?.id);
+    });
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      setCurrentUser(session?.user ?? null);
+      void refreshStoredPresets(session?.user.id);
+    });
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, [supabase]);
+
   const clearConvertedResult = () => { setConvertedFile(null); setApplyError(null); };
+
+  const submitAuthentication = async () => {
+    if (!supabase) {
+      setAuthMessage("Supabase 환경변수가 아직 연결되지 않았습니다.");
+      return;
+    }
+    if (!authEmail.trim() || authPassword.length < 6) {
+      setAuthMessage("이메일과 6자 이상의 비밀번호를 입력해 주세요.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthMessage(null);
+    if (authMode === "signin") {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      setAuthBusy(false);
+      if (error) {
+        setAuthMessage(`로그인하지 못했습니다: ${error.message}`);
+        return;
+      }
+      setAuthPassword("");
+      setAuthOpen(false);
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: authEmail.trim(),
+      password: authPassword,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setAuthBusy(false);
+    if (error) {
+      setAuthMessage(`가입하지 못했습니다: ${error.message}`);
+      return;
+    }
+    setAuthPassword("");
+    if (data.session) {
+      setAuthOpen(false);
+    } else {
+      setAuthMessage("가입 확인 메일을 보냈습니다. 메일의 링크를 누른 뒤 로그인해 주세요.");
+    }
+  };
+
+  const signOut = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setStoredPresets([]);
+    setPresetMessage(null);
+  };
+
+  const saveCurrentStyles = async () => {
+    const name = presetName.trim();
+    if (!supabase || !currentUser) {
+      setAuthOpen(true);
+      return;
+    }
+    if (!name) {
+      setPresetMessage("저장할 스타일 묶음 이름을 입력해 주세요.");
+      return;
+    }
+    setPresetsBusy(true);
+    setPresetMessage(null);
+    const { error } = await supabase.from("style_presets").upsert({
+      user_id: currentUser.id,
+      name,
+      styles,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id,name" });
+    setPresetsBusy(false);
+    if (error) {
+      setPresetMessage(`스타일을 저장하지 못했습니다: ${error.message}`);
+      return;
+    }
+    setPresetName("");
+    setPresetMessage(`‘${name}’ 스타일을 저장했습니다.`);
+    await refreshStoredPresets(currentUser.id);
+  };
+
+  const loadStoredPreset = (preset: StoredStylePreset) => {
+    const loadedStyles = readStoredStyles(preset.styles);
+    if (!loadedStyles) {
+      setPresetMessage("저장된 스타일 데이터 형식이 올바르지 않습니다.");
+      return;
+    }
+    const availableStyleIds = new Set(loadedStyles.map((style) => style.id));
+    const fallbackStyleId = loadedStyles[0].id;
+    setStyles(loadedStyles);
+    setActiveStyleId(fallbackStyleId);
+    setParagraphAssignments((current) => Object.fromEntries(
+      Object.entries(current).map(([paragraphId, styleId]) => [
+        paragraphId,
+        availableStyleIds.has(styleId) ? styleId : fallbackStyleId,
+      ]),
+    ));
+    setPresetMessage(`‘${preset.name}’ 스타일을 불러왔습니다.`);
+    clearConvertedResult();
+  };
+
+  const deleteStoredPreset = async (preset: StoredStylePreset) => {
+    if (!supabase || !currentUser) return;
+    setPresetsBusy(true);
+    const { error } = await supabase
+      .from("style_presets")
+      .delete()
+      .eq("id", preset.id)
+      .eq("user_id", currentUser.id);
+    setPresetsBusy(false);
+    if (error) {
+      setPresetMessage(`스타일을 삭제하지 못했습니다: ${error.message}`);
+      return;
+    }
+    setPresetMessage(`‘${preset.name}’ 스타일을 삭제했습니다.`);
+    await refreshStoredPresets(currentUser.id);
+  };
 
   const updateStyleSettings = (key: keyof StyleSettings, value: string | boolean) => {
     setStyles((current) => current.map((style) => style.id === activeStyleId
@@ -276,16 +484,50 @@ export default function WorkflowPage() {
             <div className="grid size-9 place-items-center rounded-xl bg-blue-600 text-white"><FileText className="size-5" /></div>
             <div><p className="text-base font-extrabold">HWPX 서식 변환</p><p className="text-xs text-slate-500">문단을 보면서 스타일로 간편하게</p></div>
           </div>
-          <ol className="flex items-center gap-2 text-xs font-bold text-slate-500" aria-label="작업 단계">
-            {["파일 선택", "스타일 지정", "다운로드"].map((label, index) => (
-              <li key={label} className="flex items-center gap-2">
-                <span className={`grid size-7 place-items-center rounded-full ${index <= stepIndex ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>{index + 1}</span>
-                <span className="hidden sm:inline">{label}</span>{index < 2 && <ChevronRight className="size-3 text-slate-300" />}
-              </li>
-            ))}
-          </ol>
+          <div className="flex items-center gap-3">
+            <ol className="hidden items-center gap-2 text-xs font-bold text-slate-500 md:flex" aria-label="작업 단계">
+              {["파일 선택", "스타일 지정", "다운로드"].map((label, index) => (
+                <li key={label} className="flex items-center gap-2">
+                  <span className={`grid size-7 place-items-center rounded-full ${index <= stepIndex ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>{index + 1}</span>
+                  <span className="hidden lg:inline">{label}</span>{index < 2 && <ChevronRight className="size-3 text-slate-300" />}
+                </li>
+              ))}
+            </ol>
+            {authReady && currentUser ? (
+              <div className="flex items-center gap-2">
+                <span className="hidden max-w-40 truncate text-xs font-semibold text-slate-500 xl:inline">{currentUser.email}</span>
+                <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void signOut()}><LogOut className="size-4" /> 로그아웃</Button>
+              </div>
+            ) : (
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => { setAuthMode("signin"); setAuthMessage(null); setAuthOpen(true); }}><LogIn className="size-4" /> 로그인</Button>
+            )}
+          </div>
         </div>
       </header>
+
+      <Dialog open={authOpen} onOpenChange={(open) => { setAuthOpen(open); if (!open) setAuthMessage(null); }}>
+        <DialogContent className="rounded-3xl border-slate-200 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{authMode === "signin" ? "내 스타일 보관함 로그인" : "스타일 보관함 계정 만들기"}</DialogTitle>
+            <DialogDescription>로그인하면 자주 쓰는 스타일 설정만 Supabase에 저장됩니다. HWPX 문서는 업로드되지 않습니다.</DialogDescription>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void submitAuthentication(); }}>
+            <div className="space-y-2">
+              <label htmlFor="auth-email" className="text-sm font-bold text-slate-700">이메일</label>
+              <input id="auth-email" type="email" autoComplete="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" placeholder="name@example.com" />
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="auth-password" className="text-sm font-bold text-slate-700">비밀번호</label>
+              <input id="auth-password" type="password" minLength={6} autoComplete={authMode === "signin" ? "current-password" : "new-password"} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" placeholder="6자 이상 입력" />
+            </div>
+            {authMessage && <p className="rounded-xl bg-blue-50 px-3 py-2 text-sm font-semibold leading-6 text-blue-800">{authMessage}</p>}
+            <Button type="submit" className="h-11 w-full rounded-xl bg-blue-600" disabled={authBusy}>{authBusy && <LoaderCircle className="size-4 animate-spin" />}{authMode === "signin" ? "로그인" : "계정 만들기"}</Button>
+          </form>
+          <button type="button" className="text-sm font-semibold text-blue-700" onClick={() => { setAuthMode((current) => current === "signin" ? "signup" : "signin"); setAuthMessage(null); }}>
+            {authMode === "signin" ? "처음 사용하시나요? 계정 만들기" : "이미 계정이 있나요? 로그인"}
+          </button>
+        </DialogContent>
+      </Dialog>
 
       {step === "upload" && (
         <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-4xl place-items-center px-5 py-12">
@@ -354,6 +596,46 @@ export default function WorkflowPage() {
                     const assigned = selectedParagraphStyleId === style.id;
                     return <button key={style.id} type="button" disabled={!selectedParagraph} onClick={() => assignSelectedParagraph(style.id)} className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition ${assigned ? `${color.badge} ring-2 ring-current` : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}><span className={`size-2 rounded-full ${color.dot}`} />{style.name}</button>;
                   })}
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-3xl border-blue-100 bg-white shadow-sm">
+                <CardHeader className="pb-3">
+                  <div className="flex items-center gap-2"><Database className="size-5 text-blue-600" /><CardTitle className="text-lg">내 스타일 보관함</CardTitle></div>
+                  <CardDescription>현재 스타일 묶음을 저장해 다음 문서에서 다시 사용할 수 있습니다.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {!supabase ? (
+                    <p className="rounded-xl bg-amber-50 p-3 text-sm font-semibold leading-6 text-amber-800">Supabase 환경변수를 연결하면 스타일 보관함이 활성화됩니다.</p>
+                  ) : !currentUser ? (
+                    <div className="rounded-2xl bg-blue-50 p-4 text-center">
+                      <p className="text-sm font-semibold leading-6 text-blue-900">로그인하면 이 문서의 스타일 설정만 저장됩니다. 문서 내용은 전송하지 않습니다.</p>
+                      <Button type="button" size="sm" className="mt-3 rounded-xl bg-blue-600" onClick={() => { setAuthMode("signin"); setAuthMessage(null); setAuthOpen(true); }}><LogIn className="size-4" /> 로그인</Button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex gap-2">
+                        <input value={presetName} onChange={(event) => setPresetName(event.target.value)} aria-label="저장할 스타일 묶음 이름" className="h-10 min-w-0 flex-1 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" placeholder="예: 정보 보고서 기본 서식" />
+                        <Button type="button" size="sm" className="h-10 rounded-xl bg-blue-600" disabled={presetsBusy} onClick={() => void saveCurrentStyles()}><Save className="size-4" /> 저장</Button>
+                      </div>
+                      <div className="space-y-2">
+                        {presetsBusy && storedPresets.length === 0 ? (
+                          <p className="flex items-center gap-2 py-3 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 저장된 스타일을 불러오는 중</p>
+                        ) : storedPresets.length === 0 ? (
+                          <p className="rounded-xl bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">아직 저장한 스타일이 없습니다.</p>
+                        ) : storedPresets.map((preset) => (
+                          <div key={preset.id} className="flex items-center gap-2 rounded-xl border border-slate-200 p-2.5">
+                            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => loadStoredPreset(preset)}>
+                              <span className="block truncate text-sm font-extrabold text-slate-800">{preset.name}</span>
+                              <span className="text-[11px] text-slate-400">클릭해서 불러오기</span>
+                            </button>
+                            <Button type="button" variant="ghost" size="icon" className="size-8 rounded-lg text-red-500" disabled={presetsBusy} onClick={() => void deleteStoredPreset(preset)} aria-label={`${preset.name} 삭제`}><Trash2 className="size-4" /></Button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {presetMessage && <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-5 text-slate-700">{presetMessage}</p>}
                 </CardContent>
               </Card>
 
