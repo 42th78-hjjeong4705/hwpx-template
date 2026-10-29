@@ -18,6 +18,7 @@ import {
   Globe2,
   Keyboard,
   LoaderCircle,
+  LogIn,
   LogOut,
   Plus,
   RotateCcw,
@@ -28,6 +29,7 @@ import {
   UploadCloud,
   UserRound,
   Users,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -63,17 +65,8 @@ const stylePalette = [
 
 const selectOptions = {
   font: ["본고딕", "맑은 고딕", "함초롬돋움", "함초롬바탕", "나눔명조"],
-  fontSize: ["9", "10", "11", "12", "14", "16", "18", "20"],
   lineSpacing: ["130", "150", "160", "180", "200"],
   indentation: ["0", "5", "10", "15", "20"],
-};
-
-const alignmentLabels: Record<string, string> = {
-  LEFT: "왼쪽",
-  CENTER: "가운데",
-  RIGHT: "오른쪽",
-  JUSTIFY: "양쪽",
-  DISTRIBUTE: "배분",
 };
 
 function SettingSelect({ label, value, options, suffix, onValueChange }: {
@@ -108,6 +101,7 @@ export default function WorkflowPage() {
   const [convertedFile, setConvertedFile] = useState<{ bytes: Uint8Array<ArrayBuffer>; analysis: HwpxAnalysis; fileName: string } | null>(null);
   const [styles, setStyles] = useState<DocumentStyle[]>(initialStyles);
   const [activeStyleId, setActiveStyleId] = useState("style-1");
+  const [stylePanelView, setStylePanelView] = useState<"settings" | "saved">("settings");
   const [paragraphAssignments, setParagraphAssignments] = useState<ParagraphStyleAssignments>({});
   const [selectedParagraphId, setSelectedParagraphId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -126,6 +120,8 @@ export default function WorkflowPage() {
   const [presetName, setPresetName] = useState("");
   const [presetDescription, setPresetDescription] = useState("");
   const [presetPublic, setPresetPublic] = useState(false);
+  const [presetDraftStyles, setPresetDraftStyles] = useState<DocumentStyle[]>(initialStyles);
+  const [presetDraftActiveId, setPresetDraftActiveId] = useState("style-1");
   const [presetsBusy, setPresetsBusy] = useState(false);
   const [presetMessage, setPresetMessage] = useState<string | null>(null);
   const [savedEquations, setSavedEquations] = useState<SavedEquation[]>([]);
@@ -137,6 +133,7 @@ export default function WorkflowPage() {
   const supabase = getSupabaseBrowserClient();
 
   const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0];
+  const activePresetDraftStyle = presetDraftStyles.find((style) => style.id === presetDraftActiveId) ?? presetDraftStyles[0];
   const selectedParagraph = analysis?.paragraphDetails.find((paragraph) => paragraph.id === selectedParagraphId);
   const selectedParagraphStyleId = selectedParagraphId ? paragraphAssignments[selectedParagraphId] : undefined;
   const styleCounts = styles.reduce<Record<string, number>>((counts, style) => {
@@ -252,7 +249,7 @@ export default function WorkflowPage() {
     setMyPageOpen(false);
   };
 
-  const saveCurrentStyles = async () => {
+  const saveMyStyleDraft = async () => {
     const name = presetName.trim();
     if (!supabase || !currentUser) {
       setAuthOpen(true);
@@ -267,7 +264,7 @@ export default function WorkflowPage() {
     const { error } = await supabase.from("style_presets").upsert({
       user_id: currentUser.id,
       name,
-      styles,
+      styles: presetDraftStyles,
       description: presetDescription.trim(),
       is_public: presetPublic,
       author_name: "익명 사용자",
@@ -281,6 +278,8 @@ export default function WorkflowPage() {
     setPresetName("");
     setPresetDescription("");
     setPresetPublic(false);
+    setPresetDraftStyles(initialStyles);
+    setPresetDraftActiveId("style-1");
     setPresetMessage(`‘${name}’ 스타일을 저장했습니다.`);
     await refreshStoredPresets(currentUser.id);
   };
@@ -303,6 +302,39 @@ export default function WorkflowPage() {
     ));
     setPresetMessage(`‘${preset.name}’ 스타일을 불러왔습니다.`);
     clearConvertedResult();
+  };
+
+  const editStoredPreset = (preset: StoredStylePreset) => {
+    const loadedStyles = readStoredStyles(preset.styles);
+    if (!loadedStyles) { setPresetMessage("저장된 스타일 데이터 형식이 올바르지 않습니다."); return; }
+    setPresetName(preset.name);
+    setPresetDescription(preset.description ?? "");
+    setPresetPublic(Boolean(preset.is_public));
+    setPresetDraftStyles(loadedStyles);
+    setPresetDraftActiveId(loadedStyles[0].id);
+    setPresetMessage(`‘${preset.name}’ 서식을 편집기에 불러왔습니다.`);
+  };
+
+  const updatePresetDraftStyle = (key: keyof StyleSettings, value: string | boolean) => {
+    setPresetDraftStyles((current) => current.map((style) => style.id === presetDraftActiveId ? { ...style, settings: { ...style.settings, [key]: value } } : style));
+  };
+
+  const updatePresetDraftName = (name: string) => {
+    setPresetDraftStyles((current) => current.map((style) => style.id === presetDraftActiveId ? { ...style, name } : style));
+  };
+
+  const addPresetDraftStyle = () => {
+    const nextNumber = Math.max(0, ...presetDraftStyles.map((style) => Number(style.id.match(/\d+$/)?.[0] ?? 0))) + 1;
+    const newStyle: DocumentStyle = { id: `style-${nextNumber}`, name: `스타일 ${nextNumber}`, colorIndex: (nextNumber - 1) % stylePalette.length, settings: { ...activePresetDraftStyle.settings } };
+    setPresetDraftStyles((current) => [...current, newStyle]);
+    setPresetDraftActiveId(newStyle.id);
+  };
+
+  const removePresetDraftStyle = (styleId: string) => {
+    if (presetDraftStyles.length <= 2) return;
+    const fallbackId = presetDraftStyles.find((style) => style.id !== styleId)?.id ?? "style-1";
+    setPresetDraftStyles((current) => current.filter((style) => style.id !== styleId));
+    if (presetDraftActiveId === styleId) setPresetDraftActiveId(fallbackId);
   };
 
   const deleteStoredPreset = async (preset: StoredStylePreset) => {
@@ -402,15 +434,15 @@ export default function WorkflowPage() {
     clearConvertedResult();
   };
 
-  const removeActiveStyle = () => {
-    if (styles.length <= 2 || !activeStyle) return;
-    const fallbackStyleId = styles.find((style) => style.id !== activeStyle.id)?.id ?? "style-1";
-    setStyles((current) => current.filter((style) => style.id !== activeStyle.id));
-    setParagraphAssignments((current) => Object.fromEntries(Object.entries(current).map(([paragraphId, styleId]) => [
+  const removeStyle = (styleId: string) => {
+    if (styles.length <= 2) return;
+    const fallbackStyleId = styles.find((style) => style.id !== styleId)?.id ?? "style-1";
+    setStyles((current) => current.filter((style) => style.id !== styleId));
+    setParagraphAssignments((current) => Object.fromEntries(Object.entries(current).map(([paragraphId, assignedStyleId]) => [
       paragraphId,
-      styleId === activeStyle.id ? fallbackStyleId : styleId,
+      assignedStyleId === styleId ? fallbackStyleId : assignedStyleId,
     ])));
-    setActiveStyleId(fallbackStyleId);
+    if (activeStyleId === styleId) setActiveStyleId(fallbackStyleId);
     clearConvertedResult();
   };
 
@@ -462,7 +494,7 @@ export default function WorkflowPage() {
       const presets = Object.fromEntries(styles.map((style) => {
         const preset: ParagraphStylePreset = {
           font: style.settings.font,
-          fontSize: Number(style.settings.fontSize),
+          fontSize: Math.min(80, Math.max(1, Number(style.settings.fontSize) || 1)),
           lineSpacing: Number(style.settings.lineSpacing),
           alignment: alignmentMap[style.settings.alignment],
           indentation: Number(style.settings.indentation),
@@ -554,15 +586,16 @@ export default function WorkflowPage() {
             <div className="max-h-[calc(90vh-12rem)] overflow-y-auto px-6 py-5">
               <TabsContent value="styles" className="space-y-5">
                 <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
-                  <h3 className="font-black text-blue-950">현재 편집 중인 스타일 묶음 저장</h3>
-                  <p className="mt-1 text-xs leading-5 text-blue-800">HWPX 문서 내용은 저장되지 않으며 글꼴·크기·정렬 같은 스타일 설정만 저장됩니다.</p>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h3 className="font-black text-blue-950">새 서식 만들기</h3><p className="mt-1 text-xs leading-5 text-blue-800">문서를 열지 않아도 소제목과 본문 서식을 직접 만들 수 있습니다.</p></div><Button type="button" variant="outline" size="sm" className="rounded-xl bg-white" onClick={addPresetDraftStyle}><Plus className="size-4" /> 스타일 추가</Button></div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <input value={presetName} onChange={(event) => setPresetName(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="서식 이름 (예: 과학 보고서)" />
                     <input value={presetDescription} onChange={(event) => setPresetDescription(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="간단한 설명 (선택)" />
                   </div>
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{presetDraftStyles.map((style, index) => <div key={style.id} className="group relative"><button type="button" onClick={() => setPresetDraftActiveId(style.id)} className={`w-full rounded-xl border p-3 pr-9 text-left ${presetDraftActiveId === style.id ? "border-blue-500 bg-white text-blue-800" : "border-blue-100 bg-white/70 text-slate-700"}`}><span className="block truncate text-sm font-black">{style.name}</span><span className="mt-1 block text-[11px] text-slate-500">{style.settings.font} · {style.settings.fontSize}pt</span></button>{index >= 2 && <button type="button" aria-label={`${style.name} 삭제`} onClick={() => removePresetDraftStyle(style.id)} className="absolute right-2 top-2 grid size-6 place-items-center rounded-full bg-white/90 text-slate-400 opacity-0 shadow-sm ring-1 ring-slate-200 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 focus:opacity-100"><X className="size-3.5" /></button>}</div>)}</div>
+                  {activePresetDraftStyle && <div className="mt-4 rounded-2xl bg-white p-4 ring-1 ring-blue-100"><input value={activePresetDraftStyle.name} onChange={(event) => updatePresetDraftName(event.target.value)} aria-label="마이페이지 스타일 이름" className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" /><div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4"><SettingSelect label="글꼴" value={activePresetDraftStyle.settings.font} options={selectOptions.font} onValueChange={(value) => updatePresetDraftStyle("font", value)} /><div className="space-y-2"><label className="text-sm font-semibold text-slate-700">글자 크기</label><div className="relative"><input type="number" min="1" max="80" step="0.5" value={activePresetDraftStyle.settings.fontSize} onChange={(event) => updatePresetDraftStyle("fontSize", event.target.value)} onBlur={(event) => updatePresetDraftStyle("fontSize", String(Math.min(80, Math.max(1, Number(event.target.value) || 1))))} className="h-10 w-full rounded-xl border border-slate-200 px-3 pr-8 text-sm outline-none focus:border-blue-500" /><span className="absolute right-3 top-2.5 text-xs text-slate-400">pt</span></div></div><SettingSelect label="줄 간격" value={activePresetDraftStyle.settings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updatePresetDraftStyle("lineSpacing", value)} /><SettingSelect label="들여쓰기" value={activePresetDraftStyle.settings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updatePresetDraftStyle("indentation", value)} /></div><div className="mt-3 grid gap-3 sm:grid-cols-2"><div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">{[false, true].map((bold) => <button key={String(bold)} type="button" onClick={() => updatePresetDraftStyle("bold", bold)} className={`h-9 rounded-lg text-xs font-bold ${activePresetDraftStyle.settings.bold === bold ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>{bold ? "굵게" : "보통"}</button>)}</div><div className="grid grid-cols-4 gap-1 rounded-xl bg-slate-100 p-1">{[["왼쪽", AlignLeft], ["가운데", AlignCenter], ["오른쪽", AlignRight], ["양쪽", AlignJustify]].map(([label, Icon]) => <button key={label as string} type="button" title={label as string} onClick={() => updatePresetDraftStyle("alignment", label as string)} className={`grid h-9 place-items-center rounded-lg ${activePresetDraftStyle.settings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}><Icon className="size-4" /></button>)}</div></div></div>}
                   <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <label className="flex items-center gap-2 text-sm font-bold text-slate-700"><input type="checkbox" checked={presetPublic} onChange={(event) => setPresetPublic(event.target.checked)} className="size-4 accent-blue-600" /> 커뮤니티에 익명으로 공개</label>
-                    <Button type="button" className="rounded-xl bg-blue-600" disabled={presetsBusy} onClick={() => void saveCurrentStyles()}>{presetsBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />} 현재 스타일 저장</Button>
+                    <Button type="button" className="rounded-xl bg-blue-600" disabled={presetsBusy} onClick={() => void saveMyStyleDraft()}>{presetsBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />} 나의 서식에 저장</Button>
                   </div>
                 </div>
                 {presetMessage && <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold leading-6 text-slate-700">{presetMessage}</p>}
@@ -570,7 +603,7 @@ export default function WorkflowPage() {
                   <div className="flex items-center justify-between"><h3 className="font-black">저장한 서식</h3><span className="text-xs font-bold text-slate-400">{storedPresets.length}개</span></div>
                   {presetsBusy && storedPresets.length === 0 ? <p className="flex items-center gap-2 py-8 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 불러오는 중</p> : storedPresets.length === 0 ? <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">저장한 서식이 없습니다.</p> : storedPresets.map((preset) => {
                     const parsed = readStoredStyles(preset.styles) ?? [];
-                    return <div key={preset.id} className="rounded-2xl border border-slate-200 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><button type="button" className="min-w-0 text-left" onClick={() => { loadStoredPreset(preset); setActiveService("converter"); setMyPageOpen(false); }}><span className="block truncate font-black text-slate-900">{preset.name}</span><span className="mt-1 block text-xs text-slate-500">{parsed.map((style) => `${style.name} ${style.settings.fontSize}pt`).join(" · ") || "스타일 정보"}</span></button><div className="flex shrink-0 gap-2"><Button type="button" variant="outline" size="sm" className={`rounded-xl ${preset.is_public ? "border-emerald-200 text-emerald-700" : ""}`} disabled={presetsBusy} onClick={() => void togglePresetVisibility(preset)}><Globe2 className="size-4" /> {preset.is_public ? "공개 중" : "비공개"}</Button><Button type="button" variant="ghost" size="icon" className="size-9 rounded-xl text-red-500" disabled={presetsBusy} onClick={() => void deleteStoredPreset(preset)} aria-label={`${preset.name} 삭제`}><Trash2 className="size-4" /></Button></div></div></div>;
+                    return <div key={preset.id} className="rounded-2xl border border-slate-200 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><span className="block truncate font-black text-slate-900">{preset.name}</span><span className="mt-1 block text-xs text-slate-500">{parsed.map((style) => `${style.name} ${style.settings.fontSize}pt`).join(" · ") || "스타일 정보"}</span></div><div className="flex shrink-0 flex-wrap gap-2"><Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => editStoredPreset(preset)}>편집</Button><Button type="button" variant="outline" size="sm" className={`rounded-xl ${preset.is_public ? "border-emerald-200 text-emerald-700" : ""}`} disabled={presetsBusy} onClick={() => void togglePresetVisibility(preset)}><Globe2 className="size-4" /> {preset.is_public ? "공개 중" : "비공개"}</Button><Button type="button" variant="ghost" size="icon" className="size-9 rounded-xl text-red-500" disabled={presetsBusy} onClick={() => void deleteStoredPreset(preset)} aria-label={`${preset.name} 삭제`}><Trash2 className="size-4" /></Button></div></div></div>;
                   })}
                 </div>
               </TabsContent>
@@ -616,7 +649,19 @@ export default function WorkflowPage() {
           </div>
 
           <div className="grid min-h-[42rem] gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-            <Card className="overflow-hidden rounded-3xl border-slate-200 bg-white shadow-sm">
+            <div className="space-y-4">
+              <Card className="rounded-3xl border-blue-100 bg-white shadow-sm">
+                <CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-lg">문단에 서식 지정</CardTitle><CardDescription className="mt-1">{selectedParagraph ? `선택 문단: ${selectedParagraph.text.slice(0, 58)}` : "아래 미리보기에서 문단을 선택하세요."}</CardDescription></div><span className="shrink-0 rounded-full bg-blue-50 px-3 py-1 text-[11px] font-bold text-blue-700">왼쪽 작업</span></div></CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  {styles.map((style) => {
+                    const color = stylePalette[style.colorIndex % stylePalette.length];
+                    const assigned = selectedParagraphStyleId === style.id;
+                    return <button key={style.id} type="button" disabled={!selectedParagraph} onClick={() => assignSelectedParagraph(style.id)} className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition ${assigned ? `${color.badge} ring-2 ring-current` : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}><span className={`size-2 rounded-full ${color.dot}`} />{style.name}</button>;
+                  })}
+                </CardContent>
+              </Card>
+
+              <Card className="overflow-hidden rounded-3xl border-slate-200 bg-white shadow-sm">
               <CardHeader className="border-b border-slate-100 pb-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div><CardTitle className="text-lg">문서 미리보기</CardTitle><CardDescription>{fileName} · {fileSize}</CardDescription></div>
@@ -635,82 +680,46 @@ export default function WorkflowPage() {
                       <button key={paragraph.id} type="button" onClick={() => setSelectedParagraphId(paragraph.id)} className={`group relative w-full rounded-xl border-l-4 px-4 py-3 text-left ring-1 transition ${color.border} ${selected ? `${color.selected} ring-2` : "bg-white ring-transparent hover:bg-slate-50 hover:ring-slate-200"}`}>
                         <span className={`absolute right-2 top-2 rounded-full px-2 py-0.5 text-[10px] font-bold opacity-80 ${color.badge}`}>{paragraphStyle.name}</span>
                         <span className="mr-2 text-[10px] font-bold text-slate-300">{index + 1}</span>
-                        <span className="whitespace-pre-wrap pr-20 text-slate-800" style={{ fontFamily: paragraphStyle.settings.font, fontSize: `${Math.max(12, Math.min(18, Number(paragraphStyle.settings.fontSize)))}px`, fontWeight: paragraphStyle.settings.bold ? 700 : 400, textAlign }}>{paragraph.text}</span>
+                        <span className="whitespace-pre-wrap pr-20 text-slate-800" style={{ fontFamily: paragraphStyle.settings.font, fontSize: `${Math.max(11, Math.min(48, Number(paragraphStyle.settings.fontSize) || 11))}px`, fontWeight: paragraphStyle.settings.bold ? 700 : 400, textAlign }}>{paragraph.text}</span>
                       </button>
                     );
                   })}
                 </div>
               </CardContent>
-            </Card>
+              </Card>
+            </div>
 
             <div className="space-y-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto lg:pr-1">
               <Card className="rounded-3xl border-slate-200 bg-white shadow-sm">
-                <CardHeader className="pb-4"><CardTitle className="text-lg">선택 문단에 스타일 지정</CardTitle><CardDescription>{selectedParagraph ? selectedParagraph.text.slice(0, 58) : "왼쪽에서 문단을 선택하세요."}</CardDescription></CardHeader>
-                <CardContent className="flex flex-wrap gap-2">
-                  {styles.map((style) => {
-                    const color = stylePalette[style.colorIndex % stylePalette.length];
-                    const assigned = selectedParagraphStyleId === style.id;
-                    return <button key={style.id} type="button" disabled={!selectedParagraph} onClick={() => assignSelectedParagraph(style.id)} className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition ${assigned ? `${color.badge} ring-2 ring-current` : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}><span className={`size-2 rounded-full ${color.dot}`} />{style.name}</button>;
-                  })}
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-3xl border-slate-200 bg-white shadow-sm">
                 <CardHeader className="pb-4">
-                  <div className="flex items-center justify-between gap-3"><div><CardTitle className="text-lg">스타일 관리</CardTitle><CardDescription>스타일을 편집하거나 새로 추가하세요.</CardDescription></div><Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={addStyle}><Plus className="size-4" /> 추가</Button></div>
+                  <div className="flex items-center justify-between gap-3"><div><CardTitle className="text-lg">스타일 관리</CardTitle><CardDescription>오른쪽에서 스타일을 만들고 수정하세요.</CardDescription></div>{stylePanelView === "settings" && <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={addStyle}><Plus className="size-4" /> 추가</Button>}</div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-2">
-                    {styles.map((style) => {
-                      const color = stylePalette[style.colorIndex % stylePalette.length];
-                      return <button key={style.id} type="button" onClick={() => setActiveStyleId(style.id)} className={`rounded-xl border p-3 text-left transition ${activeStyleId === style.id ? `${color.badge} border-current` : "border-slate-200 hover:bg-slate-50"}`}><span className="flex items-center gap-2 text-xs font-extrabold"><span className={`size-2 rounded-full ${color.dot}`} />{style.name}</span><span className="mt-1 block text-[11px] text-slate-500">{styleCounts[style.id] ?? 0}개 문단</span></button>;
-                    })}
+                  <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
+                    <button type="button" onClick={() => setStylePanelView("settings")} className={`h-9 rounded-lg text-xs font-extrabold transition ${stylePanelView === "settings" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>서식 설정</button>
+                    <button type="button" onClick={() => setStylePanelView("saved")} className={`h-9 rounded-lg text-xs font-extrabold transition ${stylePanelView === "saved" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>내 서식 불러오기</button>
                   </div>
-                  {activeStyle && (
-                    <div className="space-y-4 border-t border-slate-100 pt-4">
-                      <div className="flex gap-2"><input value={activeStyle.name} onChange={(event) => updateStyleName(event.target.value)} aria-label="스타일 이름" className="h-10 min-w-0 flex-1 rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />{styles.length > 2 && <Button type="button" variant="outline" size="icon" className="rounded-xl text-red-600" onClick={removeActiveStyle} aria-label="현재 스타일 삭제"><Trash2 className="size-4" /></Button>}</div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <SettingSelect label="글꼴" value={activeStyle.settings.font} options={selectOptions.font} onValueChange={(value) => updateStyleSettings("font", value)} />
-                        <SettingSelect label="글자 크기" value={activeStyle.settings.fontSize} options={selectOptions.fontSize} suffix="pt" onValueChange={(value) => updateStyleSettings("fontSize", value)} />
-                        <SettingSelect label="줄 간격" value={activeStyle.settings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updateStyleSettings("lineSpacing", value)} />
-                        <SettingSelect label="들여쓰기" value={activeStyle.settings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updateStyleSettings("indentation", value)} />
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">{[false, true].map((bold) => <button key={String(bold)} type="button" onClick={() => updateStyleSettings("bold", bold)} className={`h-9 rounded-lg text-xs font-bold ${activeStyle.settings.bold === bold ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>{bold ? "굵게" : "보통"}</button>)}</div>
-                      <div className="grid grid-cols-4 gap-1 rounded-xl bg-slate-100 p-1">{[["왼쪽", AlignLeft], ["가운데", AlignCenter], ["오른쪽", AlignRight], ["양쪽", AlignJustify]].map(([label, Icon]) => <button key={label as string} type="button" title={label as string} onClick={() => updateStyleSettings("alignment", label as string)} className={`grid h-9 place-items-center rounded-lg ${activeStyle.settings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}><Icon className="size-4" /></button>)}</div>
+                  {stylePanelView === "settings" ? <>
+                    <div className="grid grid-cols-2 gap-2">
+                      {styles.map((style, index) => {
+                        const color = stylePalette[style.colorIndex % stylePalette.length];
+                        return <div key={style.id} className="group relative"><button type="button" onClick={() => setActiveStyleId(style.id)} className={`w-full rounded-xl border p-3 pr-9 text-left transition ${activeStyleId === style.id ? `${color.badge} border-current` : "border-slate-200 hover:bg-slate-50"}`}><span className="flex items-center gap-2 truncate text-xs font-extrabold"><span className={`size-2 shrink-0 rounded-full ${color.dot}`} />{style.name}</span><span className="mt-1 block text-[11px] text-slate-500">{styleCounts[style.id] ?? 0}개 문단</span></button>{index >= 2 && <button type="button" onClick={() => removeStyle(style.id)} aria-label={`${style.name} 삭제`} className="absolute right-2 top-2 grid size-6 place-items-center rounded-full bg-white/90 text-slate-400 opacity-0 shadow-sm ring-1 ring-slate-200 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 focus:opacity-100"><X className="size-3.5" /></button>}</div>;
+                      })}
                     </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-3xl border-slate-200 bg-white shadow-sm">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg">원본 문서 분석</CardTitle>
-                  <CardDescription>XML에서 읽은 서식 정보입니다. 자동 분류의 참고 자료로 사용됩니다.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {[
-                    ["주요 글꼴", analysis.styles.fonts.slice(0, 3)],
-                    ["글자 크기", analysis.styles.fontSizes.slice(0, 3)],
-                    ["문단 정렬", analysis.styles.alignments.slice(0, 3).map((item) => ({ ...item, label: alignmentLabels[item.label] ?? item.label }))],
-                    ["줄 간격", analysis.styles.lineSpacings.slice(0, 3)],
-                    ["들여쓰기", analysis.styles.indentations.slice(0, 3)],
-                  ].map(([title, items]) => (
-                    <div key={title as string} className="rounded-xl bg-slate-50 p-3">
-                      <p className="text-xs font-extrabold text-slate-700">{title as string}</p>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {(items as Array<{ label: string; count: number }>).length > 0
-                          ? (items as Array<{ label: string; count: number }>).map((item) => (
-                              <span key={item.label} className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200">
-                                {item.label} · {item.count}
-                              </span>
-                            ))
-                          : <span className="text-[11px] text-slate-400">감지된 정보 없음</span>}
+                    {activeStyle && (
+                      <div className="space-y-4 border-t border-slate-100 pt-4">
+                        <input value={activeStyle.name} onChange={(event) => updateStyleName(event.target.value)} aria-label="스타일 이름" className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />
+                        <div className="grid grid-cols-2 gap-3">
+                          <SettingSelect label="글꼴" value={activeStyle.settings.font} options={selectOptions.font} onValueChange={(value) => updateStyleSettings("font", value)} />
+                          <div className="space-y-2"><label htmlFor="document-font-size" className="text-sm font-semibold text-slate-700">글자 크기</label><div className="relative"><input id="document-font-size" type="number" min="1" max="80" step="0.5" value={activeStyle.settings.fontSize} onChange={(event) => updateStyleSettings("fontSize", event.target.value)} onBlur={(event) => updateStyleSettings("fontSize", String(Math.min(80, Math.max(1, Number(event.target.value) || 1))))} className="h-10 w-full rounded-xl border border-slate-200 px-3 pr-8 text-sm outline-none focus:border-blue-500" /><span className="absolute right-3 top-2.5 text-xs text-slate-400">pt</span></div></div>
+                          <SettingSelect label="줄 간격" value={activeStyle.settings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updateStyleSettings("lineSpacing", value)} />
+                          <SettingSelect label="들여쓰기" value={activeStyle.settings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updateStyleSettings("indentation", value)} />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">{[false, true].map((bold) => <button key={String(bold)} type="button" onClick={() => updateStyleSettings("bold", bold)} className={`h-9 rounded-lg text-xs font-bold ${activeStyle.settings.bold === bold ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>{bold ? "굵게" : "보통"}</button>)}</div>
+                        <div className="grid grid-cols-4 gap-1 rounded-xl bg-slate-100 p-1">{[["왼쪽", AlignLeft], ["가운데", AlignCenter], ["오른쪽", AlignRight], ["양쪽", AlignJustify]].map(([label, Icon]) => <button key={label as string} type="button" title={label as string} onClick={() => updateStyleSettings("alignment", label as string)} className={`grid h-9 place-items-center rounded-lg ${activeStyle.settings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}><Icon className="size-4" /></button>)}</div>
                       </div>
-                    </div>
-                  ))}
-                  <p className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800">
-                    굵게 서식이 적용된 글자 {analysis.styles.boldCharacters.toLocaleString()}자를 감지했습니다.
-                  </p>
+                    )}
+                  </> : <div className="space-y-3">{!currentUser ? <div className="rounded-2xl bg-blue-50 p-4 text-center"><p className="text-sm font-semibold leading-6 text-blue-900">로그인하면 저장한 서식을 바로 불러올 수 있습니다.</p><Button type="button" size="sm" className="mt-3 rounded-xl bg-blue-600" onClick={() => { setAuthMode("signin"); setAuthOpen(true); }}><LogIn className="size-4" /> 로그인</Button></div> : presetsBusy && storedPresets.length === 0 ? <p className="flex items-center gap-2 py-5 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 내 서식을 불러오는 중</p> : storedPresets.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 px-3 py-6 text-center text-sm text-slate-500">저장한 서식이 없습니다. 마이페이지에서 만들어 보세요.</p> : storedPresets.map((preset) => <button key={preset.id} type="button" onClick={() => { loadStoredPreset(preset); setStylePanelView("settings"); }} className="w-full rounded-xl border border-slate-200 p-3 text-left transition hover:border-blue-300 hover:bg-blue-50"><span className="block truncate text-sm font-black">{preset.name}</span><span className="mt-1 block text-xs text-slate-500">클릭해서 현재 문서에 적용</span></button>)}</div>}
                 </CardContent>
               </Card>
               {applyError && <div className="flex gap-2 rounded-2xl bg-red-50 p-4 text-sm font-semibold text-red-700"><AlertCircle className="size-4 shrink-0" />{applyError}</div>}
