@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import {
   AlertCircle,
@@ -10,26 +10,33 @@ import {
   AlignRight,
   ArrowLeft,
   Check,
-  ChevronRight,
+  Copy,
   Database,
   Download,
   FileText,
   FolderOpen,
+  Globe2,
+  Keyboard,
   LoaderCircle,
-  LogIn,
   LogOut,
   Plus,
   RotateCcw,
   Save,
+  Sigma,
   Sparkles,
   Trash2,
   UploadCloud,
+  UserRound,
+  Users,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ShortcutDictionary } from "@/components/shortcut-dictionary";
+import { StyleCommunity } from "@/components/style-community";
 import {
   analyzeHwpx,
   formatHwpxByParagraphStyles,
@@ -39,47 +46,11 @@ import {
   type ParagraphStylePreset,
 } from "@/lib/hwpx-parser";
 import { getSupabaseBrowserClient } from "@/lib/supabase-client";
+import { initialStyles, readStoredStyles, type DocumentStyle, type StoredStylePreset, type StyleSettings } from "@/lib/style-presets";
 
 type WorkflowStep = "upload" | "format" | "result";
-
-type StyleSettings = {
-  font: string;
-  fontSize: string;
-  lineSpacing: string;
-  alignment: string;
-  indentation: string;
-  bold: boolean;
-};
-
-type DocumentStyle = {
-  id: string;
-  name: string;
-  colorIndex: number;
-  settings: StyleSettings;
-};
-
-type StoredStylePreset = {
-  id: string;
-  user_id: string;
-  name: string;
-  styles: unknown;
-  updated_at: string;
-};
-
-const initialStyles: DocumentStyle[] = [
-  {
-    id: "style-1",
-    name: "스타일 1 · 소제목",
-    colorIndex: 0,
-    settings: { font: "본고딕", fontSize: "14", lineSpacing: "160", alignment: "왼쪽", indentation: "0", bold: true },
-  },
-  {
-    id: "style-2",
-    name: "스타일 2 · 본문",
-    colorIndex: 1,
-    settings: { font: "함초롬바탕", fontSize: "11", lineSpacing: "160", alignment: "양쪽", indentation: "0", bold: false },
-  },
-];
+type ActiveService = "converter" | "shortcuts" | "community";
+type SavedEquation = { id: string; user_id: string; name: string; script: string; updated_at: string };
 
 const stylePalette = [
   { dot: "bg-blue-500", badge: "bg-blue-50 text-blue-700", border: "border-blue-500", selected: "bg-blue-50/80 ring-blue-300" },
@@ -105,26 +76,6 @@ const alignmentLabels: Record<string, string> = {
   DISTRIBUTE: "배분",
 };
 
-function readStoredStyles(value: unknown): DocumentStyle[] | null {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  const valid = value.every((style) => {
-    if (!style || typeof style !== "object") return false;
-    const candidate = style as Partial<DocumentStyle>;
-    const settings = candidate.settings as Partial<StyleSettings> | undefined;
-    return typeof candidate.id === "string"
-      && typeof candidate.name === "string"
-      && typeof candidate.colorIndex === "number"
-      && Boolean(settings)
-      && typeof settings?.font === "string"
-      && typeof settings.fontSize === "string"
-      && typeof settings.lineSpacing === "string"
-      && typeof settings.alignment === "string"
-      && typeof settings.indentation === "string"
-      && typeof settings.bold === "boolean";
-  });
-  return valid ? value as DocumentStyle[] : null;
-}
-
 function SettingSelect({ label, value, options, suffix, onValueChange }: {
   label: string;
   value: string;
@@ -147,6 +98,7 @@ function SettingSelect({ label, value, options, suffix, onValueChange }: {
 
 export default function WorkflowPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [activeService, setActiveService] = useState<ActiveService>("converter");
   const [step, setStep] = useState<WorkflowStep>("upload");
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileSize, setFileSize] = useState<string | null>(null);
@@ -163,8 +115,8 @@ export default function WorkflowPage() {
   const [dragging, setDragging] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [myPageOpen, setMyPageOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -172,8 +124,15 @@ export default function WorkflowPage() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [storedPresets, setStoredPresets] = useState<StoredStylePreset[]>([]);
   const [presetName, setPresetName] = useState("");
+  const [presetDescription, setPresetDescription] = useState("");
+  const [presetPublic, setPresetPublic] = useState(false);
   const [presetsBusy, setPresetsBusy] = useState(false);
   const [presetMessage, setPresetMessage] = useState<string | null>(null);
+  const [savedEquations, setSavedEquations] = useState<SavedEquation[]>([]);
+  const [equationName, setEquationName] = useState("");
+  const [equationScript, setEquationScript] = useState("");
+  const [equationsBusy, setEquationsBusy] = useState(false);
+  const [equationMessage, setEquationMessage] = useState<string | null>(null);
 
   const supabase = getSupabaseBrowserClient();
 
@@ -185,7 +144,7 @@ export default function WorkflowPage() {
     return counts;
   }, {});
 
-  const refreshStoredPresets = async (userId?: string) => {
+  const refreshStoredPresets = useCallback(async (userId?: string) => {
     if (!supabase || !userId) {
       setStoredPresets([]);
       return;
@@ -193,7 +152,7 @@ export default function WorkflowPage() {
     setPresetsBusy(true);
     const { data, error } = await supabase
       .from("style_presets")
-      .select("id,user_id,name,styles,updated_at")
+      .select("*")
       .eq("user_id", userId)
       .order("updated_at", { ascending: false });
     setPresetsBusy(false);
@@ -202,11 +161,19 @@ export default function WorkflowPage() {
       return;
     }
     setStoredPresets((data ?? []) as StoredStylePreset[]);
-  };
+  }, [supabase]);
+
+  const refreshSavedEquations = useCallback(async (userId?: string) => {
+    if (!supabase || !userId) { setSavedEquations([]); return; }
+    setEquationsBusy(true);
+    const { data, error } = await supabase.from("saved_equations").select("*").eq("user_id", userId).order("updated_at", { ascending: false });
+    setEquationsBusy(false);
+    if (error) { setEquationMessage("수식 보관함을 사용하려면 새 데이터베이스 SQL을 먼저 실행해 주세요."); return; }
+    setSavedEquations((data ?? []) as SavedEquation[]);
+  }, [supabase]);
 
   useEffect(() => {
     if (!supabase) {
-      setAuthReady(true);
       return;
     }
 
@@ -214,19 +181,20 @@ export default function WorkflowPage() {
     void supabase.auth.getUser().then(({ data }) => {
       if (!mounted) return;
       setCurrentUser(data.user);
-      setAuthReady(true);
       void refreshStoredPresets(data.user?.id);
+      void refreshSavedEquations(data.user?.id);
     });
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!mounted) return;
       setCurrentUser(session?.user ?? null);
       void refreshStoredPresets(session?.user.id);
+      void refreshSavedEquations(session?.user.id);
     });
     return () => {
       mounted = false;
       authListener.subscription.unsubscribe();
     };
-  }, [supabase]);
+  }, [supabase, refreshSavedEquations, refreshStoredPresets]);
 
   const clearConvertedResult = () => { setConvertedFile(null); setApplyError(null); };
 
@@ -278,7 +246,10 @@ export default function WorkflowPage() {
     if (!supabase) return;
     await supabase.auth.signOut();
     setStoredPresets([]);
+    setSavedEquations([]);
     setPresetMessage(null);
+    setEquationMessage(null);
+    setMyPageOpen(false);
   };
 
   const saveCurrentStyles = async () => {
@@ -297,6 +268,9 @@ export default function WorkflowPage() {
       user_id: currentUser.id,
       name,
       styles,
+      description: presetDescription.trim(),
+      is_public: presetPublic,
+      author_name: "익명 사용자",
       updated_at: new Date().toISOString(),
     }, { onConflict: "user_id,name" });
     setPresetsBusy(false);
@@ -305,6 +279,8 @@ export default function WorkflowPage() {
       return;
     }
     setPresetName("");
+    setPresetDescription("");
+    setPresetPublic(false);
     setPresetMessage(`‘${name}’ 스타일을 저장했습니다.`);
     await refreshStoredPresets(currentUser.id);
   };
@@ -344,6 +320,54 @@ export default function WorkflowPage() {
     }
     setPresetMessage(`‘${preset.name}’ 스타일을 삭제했습니다.`);
     await refreshStoredPresets(currentUser.id);
+  };
+
+  const togglePresetVisibility = async (preset: StoredStylePreset) => {
+    if (!supabase || !currentUser) return;
+    setPresetsBusy(true);
+    setPresetMessage(null);
+    const nextPublic = !preset.is_public;
+    const { error } = await supabase.from("style_presets").update({ is_public: nextPublic, author_name: "익명 사용자", updated_at: new Date().toISOString() }).eq("id", preset.id).eq("user_id", currentUser.id);
+    setPresetsBusy(false);
+    if (error) { setPresetMessage("공개 설정을 바꾸려면 새 데이터베이스 SQL을 먼저 실행해 주세요."); return; }
+    setPresetMessage(nextPublic ? `‘${preset.name}’을(를) 커뮤니티에 공개했습니다.` : `‘${preset.name}’을(를) 비공개로 전환했습니다.`);
+    await refreshStoredPresets(currentUser.id);
+  };
+
+  const saveEquation = async () => {
+    if (!supabase || !currentUser) { setAuthOpen(true); return; }
+    const name = equationName.trim();
+    const script = equationScript.trim();
+    if (!name || !script) { setEquationMessage("수식 이름과 한글 수식 스크립트를 모두 입력해 주세요."); return; }
+    setEquationsBusy(true);
+    setEquationMessage(null);
+    const { error } = await supabase.from("saved_equations").upsert({ user_id: currentUser.id, name, script, updated_at: new Date().toISOString() }, { onConflict: "user_id,name" });
+    setEquationsBusy(false);
+    if (error) { setEquationMessage("수식을 저장하려면 새 데이터베이스 SQL을 먼저 실행해 주세요."); return; }
+    setEquationName(""); setEquationScript(""); setEquationMessage(`‘${name}’ 수식을 저장했습니다.`);
+    await refreshSavedEquations(currentUser.id);
+  };
+
+  const deleteEquation = async (equation: SavedEquation) => {
+    if (!supabase || !currentUser) return;
+    setEquationsBusy(true);
+    const { error } = await supabase.from("saved_equations").delete().eq("id", equation.id).eq("user_id", currentUser.id);
+    setEquationsBusy(false);
+    if (error) { setEquationMessage(`수식을 삭제하지 못했습니다: ${error.message}`); return; }
+    setEquationMessage(`‘${equation.name}’ 수식을 삭제했습니다.`);
+    await refreshSavedEquations(currentUser.id);
+  };
+
+  const copyEquation = async (equation: SavedEquation) => {
+    try { await navigator.clipboard.writeText(equation.script); setEquationMessage(`‘${equation.name}’을(를) 복사했습니다. 한글 수식 편집기(Ctrl+N, M)에 붙여넣으세요.`); }
+    catch { setEquationMessage("브라우저가 복사를 허용하지 않았습니다. 수식 내용을 직접 선택해 주세요."); }
+  };
+
+  const openMyPage = () => {
+    if (!currentUser) { setAuthMode("signin"); setAuthMessage(null); setAuthOpen(true); return; }
+    setMyPageOpen(true);
+    void refreshStoredPresets(currentUser.id);
+    void refreshSavedEquations(currentUser.id);
   };
 
   const updateStyleSettings = (key: keyof StyleSettings, value: string | boolean) => {
@@ -474,42 +498,30 @@ export default function WorkflowPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const stepIndex = step === "upload" ? 0 : step === "format" ? 1 : 2;
-
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,_#dbeafe_0,_transparent_28%),linear-gradient(#f8fafc,#eef4fb)] text-slate-950">
-      <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-5 lg:px-8">
-          <div className="flex items-center gap-3">
+      <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 backdrop-blur">
+        <div className="mx-auto flex min-h-16 max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-2 lg:px-8">
+          <button type="button" onClick={() => setActiveService("converter")} className="flex items-center gap-3 text-left">
             <div className="grid size-9 place-items-center rounded-xl bg-blue-600 text-white"><FileText className="size-5" /></div>
-            <div><p className="text-base font-extrabold">HWPX 서식 변환</p><p className="text-xs text-slate-500">문단을 보면서 스타일로 간편하게</p></div>
-          </div>
-          <div className="flex items-center gap-3">
-            <ol className="hidden items-center gap-2 text-xs font-bold text-slate-500 md:flex" aria-label="작업 단계">
-              {["파일 선택", "스타일 지정", "다운로드"].map((label, index) => (
-                <li key={label} className="flex items-center gap-2">
-                  <span className={`grid size-7 place-items-center rounded-full ${index <= stepIndex ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>{index + 1}</span>
-                  <span className="hidden lg:inline">{label}</span>{index < 2 && <ChevronRight className="size-3 text-slate-300" />}
-                </li>
-              ))}
-            </ol>
-            {authReady && currentUser ? (
-              <div className="flex items-center gap-2">
-                <span className="hidden max-w-40 truncate text-xs font-semibold text-slate-500 xl:inline">{currentUser.email}</span>
-                <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void signOut()}><LogOut className="size-4" /> 로그아웃</Button>
-              </div>
-            ) : (
-              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => { setAuthMode("signin"); setAuthMessage(null); setAuthOpen(true); }}><LogIn className="size-4" /> 로그인</Button>
-            )}
-          </div>
+            <div><p className="text-base font-extrabold">한글 도우미</p><p className="hidden text-xs text-slate-500 sm:block">서식부터 단축키·수식까지</p></div>
+          </button>
+          <nav className="order-3 flex w-full items-center justify-center gap-1 rounded-2xl bg-slate-100 p-1 md:order-none md:w-auto" aria-label="주요 서비스">
+            {([
+              ["converter", "서식 변환", FileText],
+              ["shortcuts", "단축키 사전", Keyboard],
+              ["community", "서식 커뮤니티", Users],
+            ] as const).map(([id, label, Icon]) => <button key={id} type="button" onClick={() => setActiveService(id)} className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-extrabold transition sm:text-sm md:flex-none ${activeService === id ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}><Icon className="size-4" />{label}</button>)}
+          </nav>
+          <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={openMyPage}><UserRound className="size-4" /> 마이페이지</Button>
         </div>
       </header>
 
       <Dialog open={authOpen} onOpenChange={(open) => { setAuthOpen(open); if (!open) setAuthMessage(null); }}>
         <DialogContent className="rounded-3xl border-slate-200 sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{authMode === "signin" ? "내 스타일 보관함 로그인" : "스타일 보관함 계정 만들기"}</DialogTitle>
-            <DialogDescription>로그인하면 자주 쓰는 스타일 설정만 Supabase에 저장됩니다. HWPX 문서는 업로드되지 않습니다.</DialogDescription>
+            <DialogTitle>{authMode === "signin" ? "한글 도우미 로그인" : "한글 도우미 계정 만들기"}</DialogTitle>
+            <DialogDescription>로그인하면 나의 서식과 수식을 계정에 저장할 수 있습니다. HWPX 문서는 업로드되지 않습니다.</DialogDescription>
           </DialogHeader>
           <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void submitAuthentication(); }}>
             <div className="space-y-2">
@@ -529,7 +541,51 @@ export default function WorkflowPage() {
         </DialogContent>
       </Dialog>
 
-      {step === "upload" && (
+      <Dialog open={myPageOpen} onOpenChange={setMyPageOpen}>
+        <DialogContent className="max-h-[90vh] overflow-hidden rounded-3xl border-slate-200 p-0 sm:max-w-4xl">
+          <div className="border-b border-slate-100 px-6 pb-4 pt-6">
+            <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><UserRound className="size-5 text-blue-600" /> 마이페이지</DialogTitle><DialogDescription>{currentUser?.email} · 자주 쓰는 서식과 수식만 저장됩니다.</DialogDescription></DialogHeader>
+          </div>
+          <Tabs defaultValue="styles" className="min-h-0 gap-0">
+            <TabsList className="mx-6 mt-1 grid h-11 w-auto grid-cols-2 rounded-xl bg-slate-100 p-1">
+              <TabsTrigger value="styles" className="rounded-lg font-bold"><Database className="size-4" /> 나의 서식</TabsTrigger>
+              <TabsTrigger value="equations" className="rounded-lg font-bold"><Sigma className="size-4" /> 나의 수식</TabsTrigger>
+            </TabsList>
+            <div className="max-h-[calc(90vh-12rem)] overflow-y-auto px-6 py-5">
+              <TabsContent value="styles" className="space-y-5">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                  <h3 className="font-black text-blue-950">현재 편집 중인 스타일 묶음 저장</h3>
+                  <p className="mt-1 text-xs leading-5 text-blue-800">HWPX 문서 내용은 저장되지 않으며 글꼴·크기·정렬 같은 스타일 설정만 저장됩니다.</p>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <input value={presetName} onChange={(event) => setPresetName(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="서식 이름 (예: 과학 보고서)" />
+                    <input value={presetDescription} onChange={(event) => setPresetDescription(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="간단한 설명 (선택)" />
+                  </div>
+                  <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700"><input type="checkbox" checked={presetPublic} onChange={(event) => setPresetPublic(event.target.checked)} className="size-4 accent-blue-600" /> 커뮤니티에 익명으로 공개</label>
+                    <Button type="button" className="rounded-xl bg-blue-600" disabled={presetsBusy} onClick={() => void saveCurrentStyles()}>{presetsBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />} 현재 스타일 저장</Button>
+                  </div>
+                </div>
+                {presetMessage && <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold leading-6 text-slate-700">{presetMessage}</p>}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between"><h3 className="font-black">저장한 서식</h3><span className="text-xs font-bold text-slate-400">{storedPresets.length}개</span></div>
+                  {presetsBusy && storedPresets.length === 0 ? <p className="flex items-center gap-2 py-8 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 불러오는 중</p> : storedPresets.length === 0 ? <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">저장한 서식이 없습니다.</p> : storedPresets.map((preset) => {
+                    const parsed = readStoredStyles(preset.styles) ?? [];
+                    return <div key={preset.id} className="rounded-2xl border border-slate-200 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><button type="button" className="min-w-0 text-left" onClick={() => { loadStoredPreset(preset); setActiveService("converter"); setMyPageOpen(false); }}><span className="block truncate font-black text-slate-900">{preset.name}</span><span className="mt-1 block text-xs text-slate-500">{parsed.map((style) => `${style.name} ${style.settings.fontSize}pt`).join(" · ") || "스타일 정보"}</span></button><div className="flex shrink-0 gap-2"><Button type="button" variant="outline" size="sm" className={`rounded-xl ${preset.is_public ? "border-emerald-200 text-emerald-700" : ""}`} disabled={presetsBusy} onClick={() => void togglePresetVisibility(preset)}><Globe2 className="size-4" /> {preset.is_public ? "공개 중" : "비공개"}</Button><Button type="button" variant="ghost" size="icon" className="size-9 rounded-xl text-red-500" disabled={presetsBusy} onClick={() => void deleteStoredPreset(preset)} aria-label={`${preset.name} 삭제`}><Trash2 className="size-4" /></Button></div></div></div>;
+                  })}
+                </div>
+              </TabsContent>
+              <TabsContent value="equations" className="space-y-5">
+                <div className="rounded-2xl border border-violet-100 bg-violet-50/60 p-4"><h3 className="font-black text-violet-950">자주 쓰는 한글 수식 저장</h3><p className="mt-1 text-xs leading-5 text-violet-800">한글 수식 편집기에서 사용하는 스크립트를 저장합니다. 복사 후 한글에서 Ctrl+N, M을 눌러 붙여넣으세요.</p><div className="mt-4 grid gap-3 sm:grid-cols-[0.8fr_1.8fr_auto]"><input value={equationName} onChange={(event) => setEquationName(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-violet-500" placeholder="수식 이름" /><input value={equationScript} onChange={(event) => setEquationScript(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 font-mono text-sm outline-none focus:border-violet-500" placeholder="예: {-b +- sqrt{b^2-4ac}} over {2a}" /><Button type="button" className="rounded-xl bg-violet-600" disabled={equationsBusy} onClick={() => void saveEquation()}><Save className="size-4" /> 저장</Button></div></div>
+                {equationMessage && <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold leading-6 text-slate-700">{equationMessage}</p>}
+                <div className="space-y-3"><div className="flex items-center justify-between"><h3 className="font-black">저장한 수식</h3><span className="text-xs font-bold text-slate-400">{savedEquations.length}개</span></div>{equationsBusy && savedEquations.length === 0 ? <p className="flex items-center gap-2 py-8 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 불러오는 중</p> : savedEquations.length === 0 ? <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">저장한 수식이 없습니다.</p> : savedEquations.map((equation) => <div key={equation.id} className="flex items-center gap-3 rounded-2xl border border-slate-200 p-4"><div className="min-w-0 flex-1"><p className="font-black">{equation.name}</p><code className="mt-1 block overflow-x-auto whitespace-nowrap text-xs text-slate-500">{equation.script}</code></div><Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void copyEquation(equation)}><Copy className="size-4" /> 복사</Button><Button type="button" variant="ghost" size="icon" className="size-9 rounded-xl text-red-500" onClick={() => void deleteEquation(equation)} aria-label={`${equation.name} 삭제`}><Trash2 className="size-4" /></Button></div>)}</div>
+              </TabsContent>
+            </div>
+          </Tabs>
+          <div className="flex items-center justify-between border-t border-slate-100 px-6 py-4"><p className="text-xs text-slate-400">계정별로 안전하게 분리되어 저장됩니다.</p><Button type="button" variant="ghost" size="sm" className="rounded-xl text-slate-600" onClick={() => void signOut()}><LogOut className="size-4" /> 로그아웃</Button></div>
+        </DialogContent>
+      </Dialog>
+
+      {activeService === "converter" && step === "upload" && (
         <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-4xl place-items-center px-5 py-12">
           <section className="w-full text-center">
             <p className="text-sm font-bold text-blue-600">1 / 3 · 파일 선택</p>
@@ -552,7 +608,7 @@ export default function WorkflowPage() {
         </div>
       )}
 
-      {step === "format" && analysis && (
+      {activeService === "converter" && step === "format" && analysis && (
         <div className="mx-auto max-w-7xl px-5 py-7 lg:px-8">
           <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div><p className="text-sm font-bold text-blue-600">2 / 3 · 스타일 지정</p><h1 className="mt-1 text-2xl font-black">문단을 클릭하고 스타일을 지정하세요</h1><p className="mt-1 text-sm text-slate-500">자동 분류가 적용돼 있습니다. 틀린 문단만 바로잡으면 됩니다.</p></div>
@@ -596,46 +652,6 @@ export default function WorkflowPage() {
                     const assigned = selectedParagraphStyleId === style.id;
                     return <button key={style.id} type="button" disabled={!selectedParagraph} onClick={() => assignSelectedParagraph(style.id)} className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition ${assigned ? `${color.badge} ring-2 ring-current` : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}><span className={`size-2 rounded-full ${color.dot}`} />{style.name}</button>;
                   })}
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-3xl border-blue-100 bg-white shadow-sm">
-                <CardHeader className="pb-3">
-                  <div className="flex items-center gap-2"><Database className="size-5 text-blue-600" /><CardTitle className="text-lg">내 스타일 보관함</CardTitle></div>
-                  <CardDescription>현재 스타일 묶음을 저장해 다음 문서에서 다시 사용할 수 있습니다.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {!supabase ? (
-                    <p className="rounded-xl bg-amber-50 p-3 text-sm font-semibold leading-6 text-amber-800">Supabase 환경변수를 연결하면 스타일 보관함이 활성화됩니다.</p>
-                  ) : !currentUser ? (
-                    <div className="rounded-2xl bg-blue-50 p-4 text-center">
-                      <p className="text-sm font-semibold leading-6 text-blue-900">로그인하면 이 문서의 스타일 설정만 저장됩니다. 문서 내용은 전송하지 않습니다.</p>
-                      <Button type="button" size="sm" className="mt-3 rounded-xl bg-blue-600" onClick={() => { setAuthMode("signin"); setAuthMessage(null); setAuthOpen(true); }}><LogIn className="size-4" /> 로그인</Button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex gap-2">
-                        <input value={presetName} onChange={(event) => setPresetName(event.target.value)} aria-label="저장할 스타일 묶음 이름" className="h-10 min-w-0 flex-1 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" placeholder="예: 정보 보고서 기본 서식" />
-                        <Button type="button" size="sm" className="h-10 rounded-xl bg-blue-600" disabled={presetsBusy} onClick={() => void saveCurrentStyles()}><Save className="size-4" /> 저장</Button>
-                      </div>
-                      <div className="space-y-2">
-                        {presetsBusy && storedPresets.length === 0 ? (
-                          <p className="flex items-center gap-2 py-3 text-sm text-slate-500"><LoaderCircle className="size-4 animate-spin" /> 저장된 스타일을 불러오는 중</p>
-                        ) : storedPresets.length === 0 ? (
-                          <p className="rounded-xl bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">아직 저장한 스타일이 없습니다.</p>
-                        ) : storedPresets.map((preset) => (
-                          <div key={preset.id} className="flex items-center gap-2 rounded-xl border border-slate-200 p-2.5">
-                            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => loadStoredPreset(preset)}>
-                              <span className="block truncate text-sm font-extrabold text-slate-800">{preset.name}</span>
-                              <span className="text-[11px] text-slate-400">클릭해서 불러오기</span>
-                            </button>
-                            <Button type="button" variant="ghost" size="icon" className="size-8 rounded-lg text-red-500" disabled={presetsBusy} onClick={() => void deleteStoredPreset(preset)} aria-label={`${preset.name} 삭제`}><Trash2 className="size-4" /></Button>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                  {presetMessage && <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-5 text-slate-700">{presetMessage}</p>}
                 </CardContent>
               </Card>
 
@@ -704,7 +720,7 @@ export default function WorkflowPage() {
         </div>
       )}
 
-      {step === "result" && convertedFile && (
+      {activeService === "converter" && step === "result" && convertedFile && (
         <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-4xl place-items-center px-5 py-12">
           <section className="w-full rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-[0_24px_70px_-40px_rgba(15,23,42,0.4)] sm:p-12">
             <div className="mx-auto grid size-16 place-items-center rounded-2xl bg-emerald-50 text-emerald-600"><Check className="size-8" /></div>
@@ -717,6 +733,8 @@ export default function WorkflowPage() {
           </section>
         </div>
       )}
+      {activeService === "shortcuts" && <ShortcutDictionary />}
+      {activeService === "community" && <StyleCommunity currentUser={currentUser} onLoginRequired={() => { setAuthMode("signin"); setAuthOpen(true); }} onImported={() => void refreshStoredPresets(currentUser?.id)} />}
     </main>
   );
 }
