@@ -545,7 +545,10 @@ export default function WorkflowPage() {
               ["community", "서식 커뮤니티", Users],
             ] as const).map(([id, label, Icon]) => <button key={id} type="button" onClick={() => setActiveService(id)} className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-extrabold transition sm:text-sm md:flex-none ${activeService === id ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}><Icon className="size-4" />{label}</button>)}
           </nav>
-          <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={openMyPage}><UserRound className="size-4" /> 마이페이지</Button>
+          <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={openMyPage}>
+            {currentUser ? <UserRound className="size-4" /> : <LogIn className="size-4" />}
+            {currentUser ? "마이페이지" : "로그인"}
+          </Button>
         </div>
       </header>
 
