@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import type { User } from "@supabase/supabase-js";
 import {
   AlertCircle,
@@ -86,6 +86,59 @@ function SettingSelect({ label, value, options, suffix, onValueChange }: {
         </SelectContent>
       </Select>
     </div>
+  );
+}
+
+function ComparisonPreview({ title, badge, analysis, accent }: {
+  title: string;
+  badge: string;
+  analysis: HwpxAnalysis;
+  accent: "slate" | "blue";
+}) {
+  const accentClasses = accent === "blue"
+    ? "border-blue-200 bg-blue-50 text-blue-700"
+    : "border-slate-200 bg-slate-100 text-slate-600";
+  const alignmentMap: Record<string, CSSProperties["textAlign"]> = {
+    LEFT: "left",
+    CENTER: "center",
+    RIGHT: "right",
+    JUSTIFY: "justify",
+    DISTRIBUTE: "justify",
+  };
+
+  return (
+    <Card className="overflow-hidden rounded-3xl border-slate-200 bg-white shadow-sm">
+      <CardHeader className="border-b border-slate-100 pb-4">
+        <div className="flex items-center justify-between gap-3">
+          <div><CardTitle className="text-lg">{title}</CardTitle><CardDescription>{analysis.styles.paragraphCount}문단 · {analysis.styles.characterCount.toLocaleString()}자</CardDescription></div>
+          <span className={`rounded-full border px-3 py-1 text-xs font-extrabold ${accentClasses}`}>{badge}</span>
+        </div>
+      </CardHeader>
+      <CardContent className="h-[32rem] overflow-y-auto bg-slate-100 p-4 sm:p-5">
+        <div className="mx-auto min-h-full max-w-2xl space-y-1.5 bg-white p-6 shadow-[0_8px_30px_rgba(15,23,42,0.1)] sm:p-8">
+          {analysis.paragraphDetails.map((paragraph, index) => {
+            const format = paragraph.format;
+            const size = Number.isFinite(format.fontSize) ? Math.max(9, Math.min(42, format.fontSize ?? 11)) : 11;
+            const spacing = Number.isFinite(format.lineSpacing) ? Math.max(1, Math.min(3, (format.lineSpacing ?? 160) / 100)) : 1.6;
+            const indent = Number.isFinite(format.indentation) ? Math.max(0, Math.min(80, format.indentation ?? 0)) : 0;
+            const style: CSSProperties = {
+              fontFamily: format.font || undefined,
+              fontSize: `${size}px`,
+              fontWeight: format.bold ? 700 : 400,
+              lineHeight: spacing,
+              textAlign: alignmentMap[format.alignment ?? ""] ?? "left",
+              textIndent: `${indent}pt`,
+            };
+            return (
+              <div key={paragraph.id} className={`group relative rounded-lg px-3 py-2 transition hover:bg-blue-50/70 ${paragraph.inTable ? "border border-dashed border-slate-200" : ""}`}>
+                <span className="absolute -left-1 top-2 text-[9px] font-bold text-slate-300 opacity-0 transition group-hover:opacity-100">{index + 1}</span>
+                <p className="whitespace-pre-wrap text-slate-800" style={style}>{paragraph.text}</p>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -732,16 +785,26 @@ export default function WorkflowPage() {
         </div>
       )}
 
-      {activeService === "converter" && step === "result" && convertedFile && (
-        <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-4xl place-items-center px-5 py-12">
-          <section className="w-full rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-[0_24px_70px_-40px_rgba(15,23,42,0.4)] sm:p-12">
-            <div className="mx-auto grid size-16 place-items-center rounded-2xl bg-emerald-50 text-emerald-600"><Check className="size-8" /></div>
-            <p className="mt-6 text-sm font-bold text-emerald-600">3 / 3 · 변환 완료</p>
-            <h1 className="mt-2 text-3xl font-black tracking-tight">문단별 스타일 적용이 끝났습니다</h1>
-            <p className="mt-3 text-slate-500">{convertedFile.fileName}</p>
-            <div className="mx-auto mt-7 grid max-w-xl grid-cols-3 gap-3"><div className="rounded-2xl bg-slate-50 p-4"><p className="text-2xl font-black">{convertedFile.analysis.styles.paragraphCount}</p><p className="mt-1 text-xs text-slate-500">적용 문단</p></div><div className="rounded-2xl bg-slate-50 p-4"><p className="text-2xl font-black">{styles.length}</p><p className="mt-1 text-xs text-slate-500">사용 스타일</p></div><div className="rounded-2xl bg-slate-50 p-4"><p className="text-2xl font-black">{convertedFile.analysis.styles.characterCount.toLocaleString()}</p><p className="mt-1 text-xs text-slate-500">문서 글자</p></div></div>
-            <Button type="button" size="lg" className="mt-8 h-12 rounded-xl bg-blue-600 px-8" onClick={downloadConvertedFile}><Download className="size-5" /> HWPX 다운로드</Button>
-            <div className="mt-5 flex flex-wrap justify-center gap-2"><Button type="button" variant="ghost" className="rounded-xl" onClick={() => setStep("format")}><ArrowLeft className="size-4" /> 스타일 다시 수정</Button><Button type="button" variant="ghost" className="rounded-xl" onClick={resetAll}><RotateCcw className="size-4" /> 새 문서 변환</Button></div>
+      {activeService === "converter" && step === "result" && convertedFile && analysis && (
+        <div className="mx-auto min-h-[calc(100vh-4rem)] max-w-7xl px-5 py-8 lg:px-8">
+          <section>
+            <div className="flex flex-col gap-5 rounded-3xl border border-emerald-100 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-4">
+                <div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-600"><Check className="size-6" /></div>
+                <div><p className="text-sm font-bold text-emerald-600">3 / 3 · 변환 완료</p><h1 className="mt-1 text-2xl font-black tracking-tight sm:text-3xl">원본과 변환 결과를 비교해 보세요</h1><p className="mt-2 text-sm text-slate-500">문단별 주요 서식을 반영한 미리보기입니다. 표·이미지의 실제 배치는 한글에서 최종 확인해 주세요.</p></div>
+              </div>
+              <Button type="button" size="lg" className="h-12 shrink-0 rounded-xl bg-blue-600 px-6" onClick={downloadConvertedFile}><Download className="size-5" /> HWPX 다운로드</Button>
+            </div>
+
+            <div className="mt-6 grid gap-6 lg:grid-cols-2">
+              <ComparisonPreview title="기존 문서" badge="변환 전" analysis={analysis} accent="slate" />
+              <ComparisonPreview title="변환한 문서" badge="변환 후" analysis={convertedFile.analysis} accent="blue" />
+            </div>
+
+            <div className="mt-6 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap gap-2 text-xs font-bold text-slate-500"><span className="rounded-full bg-slate-100 px-3 py-1.5">{convertedFile.analysis.styles.paragraphCount}개 문단</span><span className="rounded-full bg-slate-100 px-3 py-1.5">{styles.length}개 스타일</span><span className="rounded-full bg-slate-100 px-3 py-1.5">{convertedFile.analysis.styles.characterCount.toLocaleString()}자</span><span className="self-center pl-1 font-semibold text-slate-400">{convertedFile.fileName}</span></div>
+              <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" className="rounded-xl" onClick={() => setStep("format")}><ArrowLeft className="size-4" /> 스타일 다시 수정</Button><Button type="button" variant="ghost" className="rounded-xl" onClick={resetAll}><RotateCcw className="size-4" /> 새 문서 변환</Button></div>
+            </div>
           </section>
         </div>
       )}

@@ -27,6 +27,14 @@ export type HwpxParagraphInfo = {
   suggestedRole: ParagraphRole;
   styleName?: string;
   inTable: boolean;
+  format: {
+    font?: string;
+    fontSize?: number;
+    lineSpacing?: number;
+    alignment?: string;
+    indentation?: number;
+    bold: boolean;
+  };
 };
 
 export type HwpxAnalysis = {
@@ -269,6 +277,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
       let boldCharacterCount = 0;
       let weightedFontSize = 0;
       let fontSizeCharacterCount = 0;
+      const paragraphFontCounts = new Map<string, number>();
 
       elements(paragraph, "run")
         .filter((run) => closestAncestor(run, "p") === paragraph)
@@ -277,6 +286,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
           if (length === 0) return;
           const style = characterStyles.get(run.getAttribute("charPrIDRef") ?? "");
           addCount(fontCounts, style?.fontName, length);
+          addCount(paragraphFontCounts, style?.fontName, length);
           addCount(fontSizeCounts, style?.fontSize, length);
           styledCharacterCount += length;
           if (style?.fontSizePt !== undefined) {
@@ -300,6 +310,14 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
           ? weightedFontSize / fontSizeCharacterCount
           : undefined,
         boldRatio: styledCharacterCount > 0 ? boldCharacterCount / styledCharacterCount : 0,
+        format: {
+          font: sortedCounts(paragraphFontCounts)[0]?.label,
+          fontSize: fontSizeCharacterCount > 0 ? weightedFontSize / fontSizeCharacterCount : undefined,
+          lineSpacing: Number.parseFloat(paragraphStyle?.lineSpacing ?? ""),
+          alignment: paragraphStyle?.alignment,
+          indentation: Number.parseFloat(paragraphStyle?.indentation ?? ""),
+          bold: styledCharacterCount > 0 && boldCharacterCount / styledCharacterCount >= 0.5,
+        },
       });
     });
   });
@@ -322,6 +340,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     paragraphIndex: paragraph.paragraphIndex,
     styleName: paragraph.styleName,
     inTable: paragraph.inTable,
+    format: paragraph.format,
     suggestedRole: classifyParagraph({
       text: paragraph.text,
       styleName: paragraph.styleName,
