@@ -37,10 +37,43 @@ export type HwpxParagraphInfo = {
   };
 };
 
+export type HwpxTableBorderInfo = {
+  type: string;
+  width?: string;
+  color?: string;
+};
+
+export type HwpxTableCellInfo = {
+  id: string;
+  column: number;
+  row: number;
+  columnSpan: number;
+  rowSpan: number;
+  paragraphIds: string[];
+  backgroundColor?: string;
+  borders: {
+    left?: HwpxTableBorderInfo;
+    right?: HwpxTableBorderInfo;
+    top?: HwpxTableBorderInfo;
+    bottom?: HwpxTableBorderInfo;
+  };
+};
+
+export type HwpxDocumentBlock =
+  | { type: "paragraph"; id: string; paragraphId: string }
+  | {
+    type: "table";
+    id: string;
+    rowCount: number;
+    columnCount: number;
+    rows: HwpxTableCellInfo[][];
+  };
+
 export type HwpxAnalysis = {
   text: string;
   paragraphs: string[];
   paragraphDetails: HwpxParagraphInfo[];
+  documentBlocks: HwpxDocumentBlock[];
   styles: HwpxStyleSummary;
 };
 
@@ -71,6 +104,11 @@ type ParagraphStyle = {
   indentation?: string;
 };
 
+type TableBorderFill = {
+  backgroundColor?: string;
+  borders: HwpxTableCellInfo["borders"];
+};
+
 const decoder = (value: Uint8Array) => strFromU8(value);
 
 function parseXml(value: Uint8Array, fileName: string) {
@@ -94,8 +132,8 @@ function elements(root: Document | Element, localName: string) {
   return Array.from(root.getElementsByTagNameNS("*", localName));
 }
 
-function closestAncestor(element: Element, localName: string) {
-  let current: Element | null = element;
+function closestAncestor(element: Element | null, localName: string) {
+  let current = element;
   while (current) {
     if (current.localName === localName) return current;
     current = current.parentElement;
@@ -132,6 +170,15 @@ function directRunText(run: Element) {
 
 function sectionOrder(fileName: string) {
   return Number(fileName.match(/section(\d+)\.xml$/i)?.[1] ?? Number.MAX_SAFE_INTEGER);
+}
+
+function tableBorderInfo(border: Element | undefined): HwpxTableBorderInfo | undefined {
+  if (!border) return undefined;
+  return {
+    type: border.getAttribute("type") ?? "NONE",
+    width: border.getAttribute("width") ?? undefined,
+    color: border.getAttribute("color") ?? undefined,
+  };
 }
 
 function classifyParagraph({
@@ -247,7 +294,28 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     });
   });
 
+  const tableBorderFills = new Map<string, TableBorderFill>();
+  elements(header, "borderFill").forEach((borderFill) => {
+    const id = borderFill.getAttribute("id");
+    if (!id) return;
+    const fillBrush = elements(borderFill, "winBrush")[0]
+      ?? elements(borderFill, "solidBrush")[0];
+    const faceColor = fillBrush?.getAttribute("faceColor")
+      ?? fillBrush?.getAttribute("color")
+      ?? undefined;
+    tableBorderFills.set(id, {
+      backgroundColor: faceColor && faceColor.toUpperCase() !== "NONE" ? faceColor : undefined,
+      borders: {
+        left: tableBorderInfo(elements(borderFill, "leftBorder")[0]),
+        right: tableBorderInfo(elements(borderFill, "rightBorder")[0]),
+        top: tableBorderInfo(elements(borderFill, "topBorder")[0]),
+        bottom: tableBorderInfo(elements(borderFill, "bottomBorder")[0]),
+      },
+    });
+  });
+
   const paragraphs: string[] = [];
+  const documentBlocks: HwpxDocumentBlock[] = [];
   const pendingParagraphDetails: Array<
     Omit<HwpxParagraphInfo, "suggestedRole"> & {
       averageFontSize?: number;
@@ -263,9 +331,14 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
 
   sectionFiles.forEach((fileName) => {
     const section = parseXml(archive[fileName], fileName);
-    elements(section, "p").forEach((paragraph, paragraphIndex) => {
+    const paragraphNodes = elements(section, "p");
+    const paragraphIdByElement = new Map<Element, string>();
+
+    paragraphNodes.forEach((paragraph, paragraphIndex) => {
       const text = directParagraphText(paragraph).trimEnd();
       if (!text.trim()) return;
+      const paragraphId = `${fileName}:${paragraphIndex}`;
+      paragraphIdByElement.set(paragraph, paragraphId);
       paragraphs.push(text);
 
       const paragraphStyle = paragraphStyles.get(paragraph.getAttribute("paraPrIDRef") ?? "");
@@ -300,7 +373,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
         });
 
       pendingParagraphDetails.push({
-        id: `${fileName}:${paragraphIndex}`,
+        id: paragraphId,
         text,
         sectionFile: fileName,
         paragraphIndex,
@@ -320,6 +393,67 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
         },
       });
     });
+
+    const handledTables = new Set<Element>();
+    const addTableBlock = (table: Element, tableIndex: number) => {
+      if (handledTables.has(table)) return;
+      handledTables.add(table);
+      const tableBorderFill = tableBorderFills.get(table.getAttribute("borderFillIDRef") ?? "");
+      const rowNodes = elements(table, "tr")
+        .filter((row) => closestAncestor(row, "tbl") === table);
+      const rows = rowNodes.map((row, rowIndex) => elements(row, "tc")
+        .filter((cell) => closestAncestor(cell, "tr") === row && closestAncestor(cell, "tbl") === table)
+        .map((cell, cellIndex) => {
+          const cellAddress = elements(cell, "cellAddr")[0];
+          const cellSpan = elements(cell, "cellSpan")[0];
+          const cellBorderFill = tableBorderFills.get(cell.getAttribute("borderFillIDRef") ?? "")
+            ?? tableBorderFill;
+          const paragraphIds = paragraphNodes
+            .filter((paragraph) => (
+              closestAncestor(paragraph, "tc") === cell
+              && closestAncestor(paragraph, "tbl") === table
+            ))
+            .map((paragraph) => paragraphIdByElement.get(paragraph))
+            .filter((id): id is string => Boolean(id));
+
+          return {
+            id: `${fileName}:table:${tableIndex}:cell:${rowIndex}:${cellIndex}`,
+            column: Number(cellAddress?.getAttribute("colAddr") ?? cellIndex),
+            row: Number(cellAddress?.getAttribute("rowAddr") ?? rowIndex),
+            columnSpan: Math.max(1, Number(cellSpan?.getAttribute("colSpan") ?? 1)),
+            rowSpan: Math.max(1, Number(cellSpan?.getAttribute("rowSpan") ?? 1)),
+            paragraphIds,
+            backgroundColor: cellBorderFill?.backgroundColor,
+            borders: cellBorderFill?.borders ?? {},
+          } satisfies HwpxTableCellInfo;
+        }));
+
+      documentBlocks.push({
+        type: "table",
+        id: `${fileName}:table:${tableIndex}`,
+        rowCount: Math.max(rowNodes.length, Number(table.getAttribute("rowCnt") ?? 0)),
+        columnCount: Math.max(1, Number(table.getAttribute("colCnt") ?? 1)),
+        rows,
+      });
+    };
+
+    const tableNodes = elements(section, "tbl");
+    paragraphNodes
+      .filter((paragraph) => !closestAncestor(paragraph, "tbl"))
+      .forEach((paragraph) => {
+        const paragraphId = paragraphIdByElement.get(paragraph);
+        if (paragraphId) {
+          documentBlocks.push({ type: "paragraph", id: paragraphId, paragraphId });
+        }
+
+        elements(paragraph, "tbl")
+          .filter((table) => closestAncestor(table.parentElement, "tbl") === null)
+          .forEach((table) => addTableBlock(table, tableNodes.indexOf(table)));
+      });
+
+    tableNodes
+      .filter((table) => closestAncestor(table.parentElement, "tbl") === null)
+      .forEach((table, tableIndex) => addTableBlock(table, tableIndex));
   });
 
   const extractedText = paragraphs.join("\n");
@@ -355,6 +489,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     text,
     paragraphs,
     paragraphDetails,
+    documentBlocks,
     styles: {
       fonts: sortedCounts(fontCounts),
       fontSizes: sortedCounts(fontSizeCounts),
