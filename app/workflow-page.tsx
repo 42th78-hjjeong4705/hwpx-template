@@ -492,12 +492,18 @@ export default function WorkflowPage() {
       const extractedStyles = extractStylesFromHwpx(fileAnalysis);
       setExtractedPresetStyles(extractedStyles);
       setPresetName((current) => current.trim() || `${file.name.replace(/\.hwpx$/i, "")} 서식`);
-      setPresetMessage("문서에서 소제목과 본문 서식을 추출했습니다. 내용을 확인한 뒤 저장해 주세요.");
+      setPresetMessage(`문서에서 서로 다른 서식 ${extractedStyles.length}개를 추출했습니다. 이름과 내용을 확인한 뒤 저장해 주세요.`);
     } catch (error) {
       setPresetFileError(error instanceof Error ? error.message : "서식 파일을 분석하는 중 오류가 발생했습니다.");
     } finally {
       setPresetFileBusy(false);
     }
+  };
+
+  const updateExtractedStyleName = (styleId: string, name: string) => {
+    setExtractedPresetStyles((current) => current?.map((style) => (
+      style.id === styleId ? { ...style, name } : style
+    )) ?? null);
   };
 
   const deleteStoredPreset = async (preset: StoredStylePreset) => {
@@ -753,7 +759,7 @@ export default function WorkflowPage() {
             <div className="max-h-[calc(90vh-12rem)] overflow-y-auto px-6 py-5">
               <TabsContent value="styles" className="space-y-5">
                 <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
-                  <div><h3 className="font-black text-blue-950">새 서식 만들기</h3><p className="mt-1 text-xs leading-5 text-blue-800">직접 설정하거나, 서식이 적용된 HWPX 문서에서 소제목과 본문 서식을 자동으로 가져올 수 있습니다.</p></div>
+                  <div><h3 className="font-black text-blue-950">새 서식 만들기</h3><p className="mt-1 text-xs leading-5 text-blue-800">직접 설정하거나, 서식이 적용된 HWPX 문서에서 서로 다른 문단 서식을 자동으로 가져올 수 있습니다.</p></div>
                   <div className="mt-4 grid grid-cols-2 rounded-xl bg-blue-100/70 p-1" role="tablist" aria-label="서식 생성 방식">
                     <button type="button" role="tab" aria-selected={presetCreationMode === "manual"} onClick={() => setPresetCreationMode("manual")} className={`h-10 rounded-lg text-sm font-black transition ${presetCreationMode === "manual" ? "bg-white text-blue-700 shadow-sm" : "text-blue-800/70"}`}>직접 만들기</button>
                     <button type="button" role="tab" aria-selected={presetCreationMode === "upload"} onClick={() => setPresetCreationMode("upload")} className={`h-10 rounded-lg text-sm font-black transition ${presetCreationMode === "upload" ? "bg-white text-blue-700 shadow-sm" : "text-blue-800/70"}`}>서식 파일 업로드하기</button>
@@ -772,11 +778,11 @@ export default function WorkflowPage() {
                     <button type="button" disabled={presetFileBusy} onClick={() => presetFileInputRef.current?.click()} className="mt-4 flex w-full flex-col items-center rounded-2xl border-2 border-dashed border-blue-200 bg-white/80 px-5 py-7 text-center transition hover:border-blue-400 hover:bg-white disabled:cursor-wait">
                       {presetFileBusy ? <LoaderCircle className="size-8 animate-spin text-blue-600" /> : <UploadCloud className="size-8 text-blue-600" />}
                       <span className="mt-2 text-sm font-black text-blue-950">{presetFileBusy ? "문서 서식을 분석하고 있어요" : presetSourceFile ?? "서식이 적용된 HWPX 파일 선택"}</span>
-                      <span className="mt-1 text-xs leading-5 text-slate-500">표 안의 문장은 제외하고 소제목과 본문에서 대표 서식을 추출합니다.</span>
+                      <span className="mt-1 text-xs leading-5 text-slate-500">글이 있는 문단의 글꼴·크기·굵기·정렬·들여쓰기·줄 간격 조합을 구분합니다.</span>
                     </button>
                     {presetFileError && <p className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold leading-6 text-red-700"><AlertCircle className="mt-1 size-4 shrink-0" />{presetFileError}</p>}
                     {extractedPresetStyles && <>
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">{extractedPresetStyles.map((style) => <div key={style.id} className="rounded-2xl border border-blue-100 bg-white p-4"><div className="flex items-center justify-between gap-2"><span className="font-black text-slate-900">{style.name.replace(/^스타일 \d+ · /, "")}</span><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${stylePalette[style.colorIndex].badge}`}>자동 추출</span></div><p className="mt-3 text-sm font-bold text-slate-800">{style.settings.font} · {style.settings.fontSize}pt · {style.settings.bold ? "굵게" : "보통"}</p><p className="mt-1 text-xs leading-5 text-slate-500">줄 간격 {style.settings.lineSpacing}% · 들여쓰기 {style.settings.indentation}pt · {style.settings.alignment} 정렬</p></div>)}</div>
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">{extractedPresetStyles.map((style) => <div key={style.id} className="rounded-2xl border border-blue-100 bg-white p-4"><div className="flex items-center justify-between gap-2"><label htmlFor={`extracted-style-${style.id}`} className="text-xs font-bold text-slate-500">서식 이름</label><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${stylePalette[style.colorIndex].badge}`}>자동 추출</span></div><input id={`extracted-style-${style.id}`} value={style.name} onChange={(event) => updateExtractedStyleName(style.id, event.target.value)} className="mt-2 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm font-black text-slate-900 outline-none focus:border-blue-500" /><p className="mt-3 text-sm font-bold text-slate-800">{style.settings.font} · {style.settings.fontSize}pt · {style.settings.bold ? "굵게" : "보통"}</p><p className="mt-1 text-xs leading-5 text-slate-500">줄 간격 {style.settings.lineSpacing}% · 들여쓰기 {style.settings.indentation}pt · {style.settings.alignment} 정렬</p></div>)}</div>
                       <div className="mt-4 grid gap-3 sm:grid-cols-2">
                         <input value={presetName} onChange={(event) => setPresetName(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="서식 이름" />
                         <input value={presetDescription} onChange={(event) => setPresetDescription(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="간단한 설명 (선택)" />

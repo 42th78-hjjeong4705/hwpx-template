@@ -1,4 +1,4 @@
-import type { HwpxAnalysis, HwpxParagraphInfo, ParagraphRole } from "@/lib/hwpx-parser";
+import type { HwpxAnalysis, HwpxParagraphInfo } from "@/lib/hwpx-parser";
 
 export type StyleSettings = {
   font: string;
@@ -77,26 +77,6 @@ function dominantValue<T extends string | number | boolean>(
   return [...weights.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 }
 
-function roleParagraphs(analysis: HwpxAnalysis, role: ParagraphRole) {
-  const meaningful = analysis.paragraphDetails.filter((paragraph) => paragraph.text.trim());
-  const outsideTables = meaningful.filter((paragraph) => !paragraph.inTable);
-  const matching = outsideTables.filter((paragraph) => paragraph.suggestedRole === role);
-  if (matching.length > 0) return matching;
-
-  const matchingWithTables = meaningful.filter((paragraph) => paragraph.suggestedRole === role);
-  if (matchingWithTables.length > 0) return matchingWithTables;
-
-  if (role === "heading" && outsideTables.length > 0) {
-    return [outsideTables.reduce((best, paragraph) => {
-      const score = (paragraph.format.fontSize ?? 0) + (paragraph.format.bold ? 3 : 0);
-      const bestScore = (best.format.fontSize ?? 0) + (best.format.bold ? 3 : 0);
-      return score > bestScore ? paragraph : best;
-    })];
-  }
-
-  return outsideTables.length > 0 ? outsideTables : meaningful;
-}
-
 function extractedSettings(paragraphs: HwpxParagraphInfo[], fallback: StyleSettings): StyleSettings {
   const fontSize = dominantValue(paragraphs, (paragraph) => paragraph.format.fontSize);
   const lineSpacing = dominantValue(paragraphs, (paragraph) => paragraph.format.lineSpacing);
@@ -125,21 +105,97 @@ function extractedSettings(paragraphs: HwpxParagraphInfo[], fallback: StyleSetti
   };
 }
 
+const genericHwpxStyleNames = new Set(["바탕글", "normal", "body text"]);
+
+function usefulStyleName(paragraph: HwpxParagraphInfo) {
+  const name = paragraph.styleName?.trim();
+  if (!name || genericHwpxStyleNames.has(name.toLowerCase())) return undefined;
+  return name;
+}
+
+function styleSignature(settings: StyleSettings, sourceStyleName?: string) {
+  return JSON.stringify([
+    sourceStyleName?.toLowerCase() ?? "",
+    settings.font.toLowerCase(),
+    settings.fontSize,
+    settings.lineSpacing,
+    settings.alignment,
+    settings.indentation,
+    settings.bold,
+  ]);
+}
+
 export function extractStylesFromHwpx(analysis: HwpxAnalysis): DocumentStyle[] {
-  const headingFallback = initialStyles[0].settings;
-  const bodyFallback = initialStyles[1].settings;
-  return [
-    {
-      id: "style-1",
-      name: "스타일 1 · 소제목",
-      colorIndex: 0,
-      settings: extractedSettings(roleParagraphs(analysis, "heading"), headingFallback),
-    },
-    {
+  const meaningful = analysis.paragraphDetails.filter((paragraph) => paragraph.text.trim());
+  const outsideTables = meaningful.filter((paragraph) => !paragraph.inTable);
+  const candidates = outsideTables.length > 0 ? outsideTables : meaningful;
+  const clusters = new Map<string, {
+    firstIndex: number;
+    paragraphs: HwpxParagraphInfo[];
+    settings: StyleSettings;
+    sourceStyleName?: string;
+    characterCount: number;
+  }>();
+
+  candidates.forEach((paragraph, index) => {
+    const fallback = paragraph.suggestedRole === "heading" ? initialStyles[0].settings : initialStyles[1].settings;
+    const settings = extractedSettings([paragraph], fallback);
+    const sourceStyleName = usefulStyleName(paragraph);
+    const signature = styleSignature(settings, sourceStyleName);
+    const existing = clusters.get(signature);
+    if (existing) {
+      existing.paragraphs.push(paragraph);
+      existing.characterCount += Math.max(1, paragraph.text.replace(/\s/g, "").length);
+      return;
+    }
+    clusters.set(signature, {
+      firstIndex: index,
+      paragraphs: [paragraph],
+      settings,
+      sourceStyleName,
+      characterCount: Math.max(1, paragraph.text.replace(/\s/g, "").length),
+    });
+  });
+
+  if (clusters.size === 0) return initialStyles.map((style) => ({ ...style, settings: { ...style.settings } }));
+
+  const selectedClusters = [...clusters.values()]
+    .sort((a, b) => b.characterCount - a.characterCount)
+    .slice(0, 8)
+    .sort((a, b) => a.firstIndex - b.firstIndex);
+  const bodyClusters = selectedClusters.filter((cluster) => (
+    cluster.paragraphs.filter((paragraph) => paragraph.suggestedRole === "body").length / cluster.paragraphs.length >= 0.5
+  ));
+  const bodyCluster = (bodyClusters.length > 0 ? bodyClusters : selectedClusters).reduce((largest, cluster) => (
+    cluster.characterCount > largest.characterCount ? cluster : largest
+  ));
+  let headingNamed = false;
+
+  const extracted = selectedClusters.map((cluster, index): DocumentStyle => {
+    const number = index + 1;
+    const headingRatio = cluster.paragraphs.filter((paragraph) => paragraph.suggestedRole === "heading").length / cluster.paragraphs.length;
+    let label = cluster.sourceStyleName;
+    if (!label && !headingNamed && headingRatio >= 0.5) {
+      label = "소제목";
+      headingNamed = true;
+    } else if (!label && cluster === bodyCluster) {
+      label = "본문";
+    }
+    return {
+      id: `style-${number}`,
+      name: label ? `스타일 ${number} · ${label}` : `스타일 ${number}`,
+      colorIndex: (number - 1) % 6,
+      settings: cluster.settings,
+    };
+  });
+
+  if (extracted.length === 1) {
+    extracted.push({
+      ...initialStyles[1],
       id: "style-2",
-      name: "스타일 2 · 본문",
       colorIndex: 1,
-      settings: extractedSettings(roleParagraphs(analysis, "body"), bodyFallback),
-    },
-  ];
+      settings: { ...initialStyles[1].settings },
+    });
+  }
+  return extracted;
 }
