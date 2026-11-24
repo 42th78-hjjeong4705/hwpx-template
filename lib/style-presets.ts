@@ -44,7 +44,7 @@ export const initialStyles: DocumentStyle[] = [
 ];
 
 export function readStoredStyles(value: unknown): DocumentStyle[] | null {
-  if (!Array.isArray(value) || value.length < 2) return null;
+  if (!Array.isArray(value) || value.length < 1) return null;
   const valid = value.every((style) => {
     if (!style || typeof style !== "object") return false;
     const candidate = style as Partial<DocumentStyle>;
@@ -127,8 +127,7 @@ function styleSignature(settings: StyleSettings, sourceStyleName?: string) {
 
 export function extractStylesFromHwpx(analysis: HwpxAnalysis): DocumentStyle[] {
   const meaningful = analysis.paragraphDetails.filter((paragraph) => paragraph.text.trim());
-  const outsideTables = meaningful.filter((paragraph) => !paragraph.inTable);
-  const candidates = outsideTables.length > 0 ? outsideTables : meaningful;
+  const candidates = meaningful;
   const clusters = new Map<string, {
     firstIndex: number;
     paragraphs: HwpxParagraphInfo[];
@@ -161,7 +160,6 @@ export function extractStylesFromHwpx(analysis: HwpxAnalysis): DocumentStyle[] {
 
   const selectedClusters = [...clusters.values()]
     .sort((a, b) => b.characterCount - a.characterCount)
-    .slice(0, 8)
     .sort((a, b) => a.firstIndex - b.firstIndex);
   const bodyClusters = selectedClusters.filter((cluster) => (
     cluster.paragraphs.filter((paragraph) => paragraph.suggestedRole === "body").length / cluster.paragraphs.length >= 0.5
@@ -189,13 +187,5 @@ export function extractStylesFromHwpx(analysis: HwpxAnalysis): DocumentStyle[] {
     };
   });
 
-  if (extracted.length === 1) {
-    extracted.push({
-      ...initialStyles[1],
-      id: "style-2",
-      colorIndex: 1,
-      settings: { ...initialStyles[1].settings },
-    });
-  }
   return extracted;
 }

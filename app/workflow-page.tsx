@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import Image from "next/image";
 import type { User } from "@supabase/supabase-js";
 import {
   AlertCircle,
@@ -44,6 +45,7 @@ import {
   formatHwpxByParagraphStyles,
   type HwpxAnalysis,
   type HwpxFormatSettings,
+  type HwpxImageInfo,
   type HwpxParagraphInfo,
   type HwpxTableBorderInfo,
   type ParagraphStyleAssignments,
@@ -115,11 +117,29 @@ function tableBorderCss(border: HwpxTableBorderInfo | undefined) {
   return `${Number(width.toFixed(2))}px ${style} ${border.color || "#0f172a"}`;
 }
 
+function PreviewDocumentImage({ image }: { image: HwpxImageInfo }) {
+  const width = Math.max(1, Math.round(image.width ?? 1200));
+  const height = Math.max(1, Math.round(image.height ?? 800));
+  return (
+    <div className="my-3 flex justify-center overflow-hidden rounded-md bg-white p-2">
+      <Image
+        src={image.dataUrl}
+        alt="HWPX 문서에 포함된 이미지"
+        width={width}
+        height={height}
+        unoptimized
+        className="h-auto max-h-[32rem] w-auto max-w-full object-contain"
+      />
+    </div>
+  );
+}
+
 function DocumentFlow({ analysis, renderParagraph }: {
   analysis: HwpxAnalysis;
   renderParagraph: (paragraph: HwpxParagraphInfo, index: number) => ReactNode;
 }) {
   const paragraphsById = new Map(analysis.paragraphDetails.map((paragraph) => [paragraph.id, paragraph]));
+  const imagesById = new Map(analysis.images.map((image) => [image.id, image]));
   const paragraphIndexes = new Map(analysis.paragraphDetails.map((paragraph, index) => [paragraph.id, index]));
   const blocks = analysis.documentBlocks.length > 0
     ? analysis.documentBlocks
@@ -134,6 +154,11 @@ function DocumentFlow({ analysis, renderParagraph }: {
       const paragraph = paragraphsById.get(block.paragraphId);
       if (!paragraph) return null;
       return <div key={block.id}>{renderParagraph(paragraph, paragraphIndexes.get(paragraph.id) ?? 0)}</div>;
+    }
+
+    if (block.type === "image") {
+      const image = imagesById.get(block.imageId);
+      return image ? <PreviewDocumentImage key={block.id} image={image} /> : null;
     }
 
     return (
@@ -153,13 +178,16 @@ function DocumentFlow({ analysis, renderParagraph }: {
                   };
                   return (
                     <td key={cell.id} colSpan={cell.columnSpan} rowSpan={cell.rowSpan} className="min-w-20 p-1.5" style={cellStyle}>
-                      {cell.paragraphIds.length > 0
-                        ? cell.paragraphIds.map((paragraphId) => {
+                      {cell.paragraphIds.map((paragraphId) => {
                           const paragraph = paragraphsById.get(paragraphId);
                           if (!paragraph) return null;
                           return <div key={paragraphId}>{renderParagraph(paragraph, paragraphIndexes.get(paragraphId) ?? 0)}</div>;
-                        })
-                        : <div className="min-h-6" aria-label="빈 표 셀" />}
+                        })}
+                      {cell.imageIds.map((imageId) => {
+                        const image = imagesById.get(imageId);
+                        return image ? <PreviewDocumentImage key={imageId} image={image} /> : null;
+                      })}
+                      {cell.paragraphIds.length === 0 && cell.imageIds.length === 0 && <div className="min-h-6" aria-label="빈 표 셀" />}
                     </td>
                   );
                 })}
@@ -257,6 +285,7 @@ export default function WorkflowPage() {
   const [presetFileBusy, setPresetFileBusy] = useState(false);
   const [presetFileError, setPresetFileError] = useState<string | null>(null);
   const [extractedPresetStyles, setExtractedPresetStyles] = useState<DocumentStyle[] | null>(null);
+  const [extractedPresetActiveId, setExtractedPresetActiveId] = useState<string | null>(null);
   const [presetsBusy, setPresetsBusy] = useState(false);
   const [presetMessage, setPresetMessage] = useState<string | null>(null);
   const [savedEquations, setSavedEquations] = useState<SavedEquation[]>([]);
@@ -269,6 +298,7 @@ export default function WorkflowPage() {
 
   const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0];
   const activePresetDraftStyle = presetDraftStyles.find((style) => style.id === presetDraftActiveId) ?? presetDraftStyles[0];
+  const activeExtractedPresetStyle = extractedPresetStyles?.find((style) => style.id === extractedPresetActiveId) ?? extractedPresetStyles?.[0];
   const styleCounts = styles.reduce<Record<string, number>>((counts, style) => {
     counts[style.id] = Object.values(paragraphAssignments).filter((styleId) => styleId === style.id).length;
     return counts;
@@ -415,6 +445,7 @@ export default function WorkflowPage() {
     setPresetDraftActiveId("style-1");
     setPresetSourceFile(null);
     setExtractedPresetStyles(null);
+    setExtractedPresetActiveId(null);
     setPresetFileError(null);
     if (presetFileInputRef.current) presetFileInputRef.current.value = "";
     setPresetMessage(`‘${name}’ 스타일을 저장했습니다.`);
@@ -480,6 +511,7 @@ export default function WorkflowPage() {
     if (!file.name.toLowerCase().endsWith(".hwpx")) {
       setPresetFileError("HWPX 파일만 선택할 수 있어요.");
       setExtractedPresetStyles(null);
+      setExtractedPresetActiveId(null);
       return;
     }
 
@@ -487,10 +519,12 @@ export default function WorkflowPage() {
     setPresetFileError(null);
     setPresetSourceFile(file.name);
     setExtractedPresetStyles(null);
+    setExtractedPresetActiveId(null);
     try {
       const fileAnalysis = await analyzeHwpx(await file.arrayBuffer());
       const extractedStyles = extractStylesFromHwpx(fileAnalysis);
       setExtractedPresetStyles(extractedStyles);
+      setExtractedPresetActiveId(extractedStyles[0]?.id ?? null);
       setPresetName((current) => current.trim() || `${file.name.replace(/\.hwpx$/i, "")} 서식`);
       setPresetMessage(`문서에서 서로 다른 서식 ${extractedStyles.length}개를 추출했습니다. 이름과 내용을 확인한 뒤 저장해 주세요.`);
     } catch (error) {
@@ -504,6 +538,36 @@ export default function WorkflowPage() {
     setExtractedPresetStyles((current) => current?.map((style) => (
       style.id === styleId ? { ...style, name } : style
     )) ?? null);
+  };
+
+  const updateExtractedStyleSettings = (key: keyof StyleSettings, value: string | boolean) => {
+    if (!activeExtractedPresetStyle) return;
+    setExtractedPresetStyles((current) => current?.map((style) => (
+      style.id === activeExtractedPresetStyle.id
+        ? { ...style, settings: { ...style.settings, [key]: value } }
+        : style
+    )) ?? null);
+  };
+
+  const addExtractedStyle = () => {
+    const current = extractedPresetStyles ?? [];
+    const nextNumber = Math.max(0, ...current.map((style) => Number(style.id.match(/\d+$/)?.[0] ?? 0))) + 1;
+    const source = activeExtractedPresetStyle?.settings ?? initialStyles[1].settings;
+    const newStyle: DocumentStyle = {
+      id: `style-${nextNumber}`,
+      name: `스타일 ${nextNumber}`,
+      colorIndex: (nextNumber - 1) % stylePalette.length,
+      settings: { ...source },
+    };
+    setExtractedPresetStyles([...current, newStyle]);
+    setExtractedPresetActiveId(newStyle.id);
+  };
+
+  const removeExtractedStyle = (styleId: string) => {
+    if (!extractedPresetStyles || extractedPresetStyles.length <= 1) return;
+    const remaining = extractedPresetStyles.filter((style) => style.id !== styleId);
+    setExtractedPresetStyles(remaining);
+    if (extractedPresetActiveId === styleId) setExtractedPresetActiveId(remaining[0]?.id ?? null);
   };
 
   const deleteStoredPreset = async (preset: StoredStylePreset) => {
@@ -778,11 +842,17 @@ export default function WorkflowPage() {
                     <button type="button" disabled={presetFileBusy} onClick={() => presetFileInputRef.current?.click()} className="mt-4 flex w-full flex-col items-center rounded-2xl border-2 border-dashed border-blue-200 bg-white/80 px-5 py-7 text-center transition hover:border-blue-400 hover:bg-white disabled:cursor-wait">
                       {presetFileBusy ? <LoaderCircle className="size-8 animate-spin text-blue-600" /> : <UploadCloud className="size-8 text-blue-600" />}
                       <span className="mt-2 text-sm font-black text-blue-950">{presetFileBusy ? "문서 서식을 분석하고 있어요" : presetSourceFile ?? "서식이 적용된 HWPX 파일 선택"}</span>
-                      <span className="mt-1 text-xs leading-5 text-slate-500">글이 있는 문단의 글꼴·크기·굵기·정렬·들여쓰기·줄 간격 조합을 구분합니다.</span>
+                      <span className="mt-1 text-xs leading-5 text-slate-500">본문과 표 안의 글이 있는 문단에서 글꼴·크기·굵기·정렬·들여쓰기·줄 간격 조합을 구분합니다.</span>
                     </button>
                     {presetFileError && <p className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold leading-6 text-red-700"><AlertCircle className="mt-1 size-4 shrink-0" />{presetFileError}</p>}
                     {extractedPresetStyles && <>
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">{extractedPresetStyles.map((style) => <div key={style.id} className="rounded-2xl border border-blue-100 bg-white p-4"><div className="flex items-center justify-between gap-2"><label htmlFor={`extracted-style-${style.id}`} className="text-xs font-bold text-slate-500">서식 이름</label><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${stylePalette[style.colorIndex].badge}`}>자동 추출</span></div><input id={`extracted-style-${style.id}`} value={style.name} onChange={(event) => updateExtractedStyleName(style.id, event.target.value)} className="mt-2 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm font-black text-slate-900 outline-none focus:border-blue-500" /><p className="mt-3 text-sm font-bold text-slate-800">{style.settings.font} · {style.settings.fontSize}pt · {style.settings.bold ? "굵게" : "보통"}</p><p className="mt-1 text-xs leading-5 text-slate-500">줄 간격 {style.settings.lineSpacing}% · 들여쓰기 {style.settings.indentation}pt · {style.settings.alignment} 정렬</p></div>)}</div>
+                      <div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm font-black text-blue-950">추출된 스타일 <span className="text-blue-600">{extractedPresetStyles.length}개</span></p><Button type="button" variant="outline" size="sm" className="rounded-xl bg-white" onClick={addExtractedStyle}><Plus className="size-4" /> 새 스타일 추가</Button></div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">{extractedPresetStyles.map((style) => {
+                        const active = activeExtractedPresetStyle?.id === style.id;
+                        const color = stylePalette[style.colorIndex % stylePalette.length];
+                        return <div key={style.id} className="group relative"><button type="button" onClick={() => setExtractedPresetActiveId(style.id)} className={`w-full rounded-2xl border bg-white p-4 pr-10 text-left transition ${active ? "border-blue-500 ring-2 ring-blue-100" : "border-blue-100 hover:border-blue-300"}`}><div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-black text-slate-900">{style.name}</span><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${color.badge}`}>{active ? "설정 중" : "자동 추출"}</span></div><p className="mt-3 text-sm font-bold text-slate-800">{style.settings.font} · {style.settings.fontSize}pt · {style.settings.bold ? "굵게" : "보통"}</p><p className="mt-1 text-xs leading-5 text-slate-500">줄 간격 {style.settings.lineSpacing}% · 들여쓰기 {style.settings.indentation}pt · {style.settings.alignment} 정렬</p></button>{extractedPresetStyles.length > 1 && <button type="button" aria-label={`${style.name} 삭제`} onClick={() => removeExtractedStyle(style.id)} className="absolute right-2 top-2 grid size-7 place-items-center rounded-full bg-white text-slate-400 opacity-0 shadow-sm ring-1 ring-slate-200 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 focus:opacity-100"><X className="size-4" /></button>}</div>;
+                      })}</div>
+                      {activeExtractedPresetStyle && <div className="mt-4 rounded-2xl bg-white p-4 ring-1 ring-blue-100"><input value={activeExtractedPresetStyle.name} onChange={(event) => updateExtractedStyleName(activeExtractedPresetStyle.id, event.target.value)} aria-label="추출된 스타일 이름" className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" /><div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4"><SettingSelect label="글꼴" value={activeExtractedPresetStyle.settings.font} options={selectOptions.font} onValueChange={(value) => updateExtractedStyleSettings("font", value)} /><div className="space-y-2"><label htmlFor="extracted-font-size" className="text-sm font-semibold text-slate-700">글자 크기</label><div className="relative"><input id="extracted-font-size" type="number" min="1" max="80" step="0.5" value={activeExtractedPresetStyle.settings.fontSize} onChange={(event) => updateExtractedStyleSettings("fontSize", event.target.value)} onBlur={(event) => updateExtractedStyleSettings("fontSize", String(Math.min(80, Math.max(1, Number(event.target.value) || 1))))} className="h-10 w-full rounded-xl border border-slate-200 px-3 pr-8 text-sm outline-none focus:border-blue-500" /><span className="absolute right-3 top-2.5 text-xs text-slate-400">pt</span></div></div><SettingSelect label="줄 간격" value={activeExtractedPresetStyle.settings.lineSpacing} options={selectOptions.lineSpacing} suffix="%" onValueChange={(value) => updateExtractedStyleSettings("lineSpacing", value)} /><SettingSelect label="들여쓰기" value={activeExtractedPresetStyle.settings.indentation} options={selectOptions.indentation} suffix="pt" onValueChange={(value) => updateExtractedStyleSettings("indentation", value)} /></div><div className="mt-3 grid gap-3 sm:grid-cols-2"><div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">{[false, true].map((bold) => <button key={String(bold)} type="button" onClick={() => updateExtractedStyleSettings("bold", bold)} className={`h-9 rounded-lg text-xs font-bold ${activeExtractedPresetStyle.settings.bold === bold ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}>{bold ? "굵게" : "보통"}</button>)}</div><div className="grid grid-cols-4 gap-1 rounded-xl bg-slate-100 p-1">{[["왼쪽", AlignLeft], ["가운데", AlignCenter], ["오른쪽", AlignRight], ["양쪽", AlignJustify]].map(([label, Icon]) => <button key={label as string} type="button" title={label as string} onClick={() => updateExtractedStyleSettings("alignment", label as string)} className={`grid h-9 place-items-center rounded-lg ${activeExtractedPresetStyle.settings.alignment === label ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"}`}><Icon className="size-4" /></button>)}</div></div></div>}
                       <div className="mt-4 grid gap-3 sm:grid-cols-2">
                         <input value={presetName} onChange={(event) => setPresetName(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="서식 이름" />
                         <input value={presetDescription} onChange={(event) => setPresetDescription(event.target.value)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500" placeholder="간단한 설명 (선택)" />
@@ -931,7 +1001,7 @@ export default function WorkflowPage() {
             <div className="flex flex-col gap-5 rounded-3xl border border-emerald-100 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-4">
                 <div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-600"><Check className="size-6" /></div>
-                <div><p className="text-sm font-bold text-emerald-600">3 / 3 · 변환 완료</p><h1 className="mt-1 text-2xl font-black tracking-tight sm:text-3xl">원본과 변환 결과를 비교해 보세요</h1><p className="mt-2 text-sm text-slate-500">문단 서식과 표의 행·열·병합 셀을 반영한 미리보기입니다. 이미지는 한글에서 최종 확인해 주세요.</p></div>
+                <div><p className="text-sm font-bold text-emerald-600">3 / 3 · 변환 완료</p><h1 className="mt-1 text-2xl font-black tracking-tight sm:text-3xl">원본과 변환 결과를 비교해 보세요</h1><p className="mt-2 text-sm text-slate-500">문단 서식과 표의 행·열·병합 셀, 문서 이미지를 함께 반영한 미리보기입니다.</p></div>
               </div>
               <Button type="button" size="lg" className="h-12 shrink-0 rounded-xl bg-blue-600 px-6" onClick={downloadConvertedFile}><Download className="size-5" /> HWPX 다운로드</Button>
             </div>

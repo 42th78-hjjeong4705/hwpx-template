@@ -50,6 +50,7 @@ export type HwpxTableCellInfo = {
   columnSpan: number;
   rowSpan: number;
   paragraphIds: string[];
+  imageIds: string[];
   backgroundColor?: string;
   borders: {
     left?: HwpxTableBorderInfo;
@@ -59,8 +60,16 @@ export type HwpxTableCellInfo = {
   };
 };
 
+export type HwpxImageInfo = {
+  id: string;
+  dataUrl: string;
+  width?: number;
+  height?: number;
+};
+
 export type HwpxDocumentBlock =
   | { type: "paragraph"; id: string; paragraphId: string }
+  | { type: "image"; id: string; imageId: string }
   | {
     type: "table";
     id: string;
@@ -74,6 +83,7 @@ export type HwpxAnalysis = {
   paragraphs: string[];
   paragraphDetails: HwpxParagraphInfo[];
   documentBlocks: HwpxDocumentBlock[];
+  images: HwpxImageInfo[];
   styles: HwpxStyleSummary;
 };
 
@@ -172,6 +182,15 @@ function sectionOrder(fileName: string) {
   return Number(fileName.match(/section(\d+)\.xml$/i)?.[1] ?? Number.MAX_SAFE_INTEGER);
 }
 
+function bytesToDataUrl(bytes: Uint8Array, mimeType: string) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return `data:${mimeType};base64,${btoa(binary)}`;
+}
+
 function tableBorderInfo(border: Element | undefined): HwpxTableBorderInfo | undefined {
   if (!border) return undefined;
   return {
@@ -181,41 +200,28 @@ function tableBorderInfo(border: Element | undefined): HwpxTableBorderInfo | und
   };
 }
 
-function classifyParagraph({
+export function classifyParagraphRole({
   text,
-  styleName,
   averageFontSize,
-  dominantFontSize,
+  majorityFontSize,
   boldRatio,
-  inTable,
 }: {
   text: string;
-  styleName?: string;
   averageFontSize?: number;
-  dominantFontSize?: number;
+  majorityFontSize?: number;
   boldRatio: number;
-  inTable: boolean;
 }): ParagraphRole {
-  const normalizedStyleName = styleName?.toLowerCase() ?? "";
-  if (/본문|바탕글|body|normal/.test(normalizedStyleName)) return "body";
-  if (/소제목|제목|개요|heading|title/.test(normalizedStyleName)) return "heading";
-
-  let score = 0;
   const trimmed = text.trim();
-  if (trimmed.length <= 45) score += 1;
-  if (trimmed.length <= 22) score += 1;
-  if (/^(?:\d+(?:\.\d+)*[.)]?|[가-힣][.)]|[Ⅰ-Ⅻ]+[.)]?|[①-⑳])\s*/.test(trimmed)) score += 2;
-  if (!/[.!?。！？]$/.test(trimmed)) score += 1;
-  if (boldRatio >= 0.6) score += 2;
-  if (
-    averageFontSize !== undefined
-    && dominantFontSize !== undefined
-    && averageFontSize >= dominantFontSize + 0.5
-  ) {
-    score += 2;
-  }
-  if (trimmed.length >= 80) score -= 3;
-  if (inTable) score -= 2;
+  const startsWithHeadingMarker = /^(?:(?:\d+(?:\.\d+)*|[IVXLCDM]+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+)\.|[\(\[\{（]\s*(?:\d+|[IVXLCDM]+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+)\s*[\)\]\}）]|(?:\d+|[IVXLCDM]+)[\)）]|[■□●○◆◇▶▷▣※•·▪▫▲△▼▽★☆])\s*/iu.test(trimmed);
+  const endsWithSentenceEnding = /[다요함됨][.!?。！？]?$/.test(trimmed);
+  const checks = [
+    averageFontSize !== undefined && majorityFontSize !== undefined && averageFontSize > majorityFontSize,
+    boldRatio >= 0.5,
+    startsWithHeadingMarker,
+    trimmed.length <= 40,
+    !endsWithSentenceEnding,
+  ];
+  const score = checks.filter(Boolean).length;
   return score >= 3 ? "heading" : "body";
 }
 
@@ -237,6 +243,20 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
   }
 
   const header = parseXml(headerFile, "Contents/header.xml");
+  const manifestFile = archive["Contents/content.hpf"];
+  const imageSources = new Map<string, { dataUrl: string }>();
+  if (manifestFile) {
+    const manifest = parseXml(manifestFile, "Contents/content.hpf");
+    elements(manifest, "item").forEach((item) => {
+      const id = item.getAttribute("id");
+      const path = item.getAttribute("href")?.replace(/^\.\//, "");
+      const mimeType = item.getAttribute("media-type") ?? "application/octet-stream";
+      const bytes = path ? archive[path] : undefined;
+      if (id && bytes && mimeType.startsWith("image/")) {
+        imageSources.set(id, { dataUrl: bytesToDataUrl(bytes, mimeType) });
+      }
+    });
+  }
   const hangulFontFace = elements(header, "fontface").find(
     (fontFace) => fontFace.getAttribute("lang")?.toUpperCase() === "HANGUL",
   );
@@ -316,6 +336,8 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
 
   const paragraphs: string[] = [];
   const documentBlocks: HwpxDocumentBlock[] = [];
+  const images: HwpxImageInfo[] = [];
+  const imageIds = new Set<string>();
   const pendingParagraphDetails: Array<
     Omit<HwpxParagraphInfo, "suggestedRole"> & {
       averageFontSize?: number;
@@ -333,6 +355,28 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     const section = parseXml(archive[fileName], fileName);
     const paragraphNodes = elements(section, "p");
     const paragraphIdByElement = new Map<Element, string>();
+    const pictureNodes = elements(section, "pic");
+    const imageIdByPicture = new Map<Element, string>();
+
+    pictureNodes.forEach((picture, pictureIndex) => {
+      const binaryReference = elements(picture, "img")[0]?.getAttribute("binaryItemIDRef");
+      const source = binaryReference ? imageSources.get(binaryReference) : undefined;
+      if (!source) return;
+      const size = elements(picture, "curSz")[0] ?? elements(picture, "sz")[0];
+      const width = Number(size?.getAttribute("width"));
+      const height = Number(size?.getAttribute("height"));
+      const imageId = `${fileName}:image:${pictureIndex}`;
+      imageIdByPicture.set(picture, imageId);
+      if (!imageIds.has(imageId)) {
+        imageIds.add(imageId);
+        images.push({
+          id: imageId,
+          dataUrl: source.dataUrl,
+          width: Number.isFinite(width) && width > 0 ? width : undefined,
+          height: Number.isFinite(height) && height > 0 ? height : undefined,
+        });
+      }
+    });
 
     paragraphNodes.forEach((paragraph, paragraphIndex) => {
       const text = directParagraphText(paragraph).trimEnd();
@@ -415,6 +459,10 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
             ))
             .map((paragraph) => paragraphIdByElement.get(paragraph))
             .filter((id): id is string => Boolean(id));
+          const cellImageIds = pictureNodes
+            .filter((picture) => closestAncestor(picture, "tc") === cell && closestAncestor(picture, "tbl") === table)
+            .map((picture) => imageIdByPicture.get(picture))
+            .filter((id): id is string => Boolean(id));
 
           return {
             id: `${fileName}:table:${tableIndex}:cell:${rowIndex}:${cellIndex}`,
@@ -423,6 +471,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
             columnSpan: Math.max(1, Number(cellSpan?.getAttribute("colSpan") ?? 1)),
             rowSpan: Math.max(1, Number(cellSpan?.getAttribute("rowSpan") ?? 1)),
             paragraphIds,
+            imageIds: cellImageIds,
             backgroundColor: cellBorderFill?.backgroundColor,
             borders: cellBorderFill?.borders ?? {},
           } satisfies HwpxTableCellInfo;
@@ -449,6 +498,13 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
         elements(paragraph, "tbl")
           .filter((table) => closestAncestor(table.parentElement, "tbl") === null)
           .forEach((table) => addTableBlock(table, tableNodes.indexOf(table)));
+
+        pictureNodes
+          .filter((picture) => closestAncestor(picture, "p") === paragraph && !closestAncestor(picture, "tbl"))
+          .forEach((picture, pictureIndex) => {
+            const imageId = imageIdByPicture.get(picture);
+            if (imageId) documentBlocks.push({ type: "image", id: `${imageId}:block:${pictureIndex}`, imageId });
+          });
       });
 
     tableNodes
@@ -466,7 +522,12 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     throw new Error("문서에서 표시할 텍스트를 찾지 못했습니다.");
   }
 
-  const dominantFontSize = Number.parseFloat(sortedCounts(fontSizeCounts)[0]?.label ?? "");
+  const sortedFontSizes = sortedCounts(fontSizeCounts);
+  const countedFontSizeCharacters = sortedFontSizes.reduce((total, item) => total + item.count, 0);
+  const majorityFontSizeEntry = sortedFontSizes[0];
+  const majorityFontSize = majorityFontSizeEntry && majorityFontSizeEntry.count / Math.max(1, countedFontSizeCharacters) >= 0.5
+    ? Number.parseFloat(majorityFontSizeEntry.label)
+    : undefined;
   const paragraphDetails: HwpxParagraphInfo[] = pendingParagraphDetails.map((paragraph) => ({
     id: paragraph.id,
     text: paragraph.text,
@@ -475,13 +536,11 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     styleName: paragraph.styleName,
     inTable: paragraph.inTable,
     format: paragraph.format,
-    suggestedRole: classifyParagraph({
+    suggestedRole: classifyParagraphRole({
       text: paragraph.text,
-      styleName: paragraph.styleName,
       averageFontSize: paragraph.averageFontSize,
-      dominantFontSize: Number.isFinite(dominantFontSize) ? dominantFontSize : undefined,
+      majorityFontSize: Number.isFinite(majorityFontSize) ? majorityFontSize : undefined,
       boldRatio: paragraph.boldRatio,
-      inTable: paragraph.inTable,
     }),
   }));
 
@@ -490,6 +549,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     paragraphs,
     paragraphDetails,
     documentBlocks,
+    images,
     styles: {
       fonts: sortedCounts(fontCounts),
       fontSizes: sortedCounts(fontSizeCounts),
