@@ -256,6 +256,60 @@ function hiddenTrackedElements(
   return hidden;
 }
 
+function visibleTextNodes(root: Document, hiddenDeleteChangeIds: Set<string>) {
+  const visible = new Set<Text>();
+  const activeRanges = new Set<string>();
+
+  const visit = (node: Node) => {
+    if (node.nodeType === 3) {
+      if (activeRanges.size === 0) visible.add(node as Text);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+
+    const element = node as Element;
+    if (
+      element.localName === "hiddenComment"
+      || !isInSelectedCompatibilityBranch(element)
+    ) {
+      return;
+    }
+
+    const rangeId = element.getAttribute("Id") ?? element.getAttribute("id") ?? "";
+    const changeId = element.getAttribute("TcId") ?? element.getAttribute("tcId") ?? "";
+    const rangeKey = `${changeId}:${rangeId}`;
+
+    if (element.localName === "deleteEnd" && rangeId) {
+      activeRanges.delete(rangeKey);
+    }
+    if (
+      element.localName === "deleteBegin"
+      && rangeId
+      && hiddenDeleteChangeIds.has(changeId)
+    ) {
+      activeRanges.add(rangeKey);
+    }
+
+    Array.from(element.childNodes).forEach(visit);
+  };
+
+  if (root.documentElement) visit(root.documentElement);
+  return visible;
+}
+
+function textFromVisibleNodes(element: Element, visibleNodes: Set<Text>) {
+  let text = "";
+  const collect = (node: Node) => {
+    if (node.nodeType === 3) {
+      if (visibleNodes.has(node as Text)) text += node.nodeValue ?? "";
+      return;
+    }
+    Array.from(node.childNodes).forEach(collect);
+  };
+  collect(element);
+  return text;
+}
+
 function isInsideHiddenDocumentRegion(element: Element) {
   return Boolean(closestAncestor(element.parentElement, "hiddenComment"));
 }
@@ -301,18 +355,18 @@ function isPageRelative(value: string) {
   return normalized === "PAGE" || normalized === "PAPER";
 }
 
-function directParagraphText(paragraph: Element) {
+function directParagraphText(paragraph: Element, visibleNodes: Set<Text>) {
   return elements(paragraph, "t")
     .filter((textNode) => closestAncestor(textNode, "p") === paragraph)
-    .map((textNode) => textNode.textContent ?? "")
+    .map((textNode) => textFromVisibleNodes(textNode, visibleNodes))
     .join("")
     .replace(/\u0000/g, "");
 }
 
-function directRunText(run: Element) {
+function directRunText(run: Element, visibleNodes: Set<Text>) {
   return elements(run, "t")
     .filter((textNode) => closestAncestor(textNode, "run") === run)
-    .map((textNode) => textNode.textContent ?? "")
+    .map((textNode) => textFromVisibleNodes(textNode, visibleNodes))
     .join("")
     .replace(/\u0000/g, "");
 }
@@ -344,13 +398,16 @@ export function classifyParagraphRole({
   averageFontSize,
   majorityFontSize,
   boldRatio,
+  inTable = false,
 }: {
   text: string;
   averageFontSize?: number;
   majorityFontSize?: number;
   boldRatio: number;
+  inTable?: boolean;
 }): ParagraphRole {
   const trimmed = text.trim();
+  if (inTable || trimmed.length > 40) return "body";
   const startsWithHeadingMarker = /^(?:(?:\d+(?:\.\d+)*|[IVXLCDM]+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+)\.|[\(\[\{（]\s*(?:\d+|[IVXLCDM]+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+)\s*[\)\]\}）]|(?:\d+|[IVXLCDM]+)[\)）]|[■□●○◆◇▶▷▣※•·▪▫▲△▼▽★☆])\s*/iu.test(trimmed);
   const endsWithSentenceEnding = /[다요함됨][.!?。！？]?$/.test(trimmed);
   const checks = [
@@ -501,6 +558,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
 
   sectionFiles.forEach((fileName) => {
     const section = parseXml(archive[fileName], fileName);
+    const visibleNodes = visibleTextNodes(section, hiddenDeleteChangeIds);
     const paragraphNodes = elements(section, "p");
     const paragraphIdByElement = new Map<Element, string>();
     const picturesInHiddenDeletions = hiddenTrackedElements(
@@ -613,7 +671,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     });
 
     paragraphNodes.forEach((paragraph, paragraphIndex) => {
-      const text = directParagraphText(paragraph).trimEnd();
+      const text = directParagraphText(paragraph, visibleNodes).trimEnd();
       if (!text.trim()) return;
       const paragraphId = `${fileName}:${paragraphIndex}`;
       paragraphIdByElement.set(paragraph, paragraphId);
@@ -633,7 +691,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
       elements(paragraph, "run")
         .filter((run) => closestAncestor(run, "p") === paragraph)
         .forEach((run) => {
-          const length = directRunText(run).replace(/\s/g, "").length;
+          const length = directRunText(run, visibleNodes).replace(/\s/g, "").length;
           if (length === 0) return;
           const style = characterStyles.get(run.getAttribute("charPrIDRef") ?? "");
           addCount(fontCounts, style?.fontName, length);
@@ -783,6 +841,7 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
       averageFontSize: paragraph.averageFontSize,
       majorityFontSize: Number.isFinite(majorityFontSize) ? majorityFontSize : undefined,
       boldRatio: paragraph.boldRatio,
+      inTable: paragraph.inTable,
     }),
   }));
 
