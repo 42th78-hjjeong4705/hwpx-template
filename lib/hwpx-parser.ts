@@ -179,6 +179,87 @@ function closestAncestor(element: Element | null, localName: string) {
   return null;
 }
 
+const supportedHwpxNamespaces = new Set([
+  "hc",
+  "hh",
+  "hp",
+  "hs",
+  "http://www.hancom.co.kr/hwpml/2011/core",
+  "http://www.hancom.co.kr/hwpml/2011/head",
+  "http://www.hancom.co.kr/hwpml/2011/paragraph",
+  "http://www.hancom.co.kr/hwpml/2011/section",
+]);
+
+function selectedCompatibilityBranch(switchElement: Element) {
+  const branches = Array.from(switchElement.children).filter(
+    (child) => child.localName === "case" || child.localName === "default",
+  );
+  const supportedCase = branches.find((branch) => {
+    if (branch.localName !== "case") return false;
+    const requirement = branch.getAttribute("required-namespace")
+      ?? branch.getAttribute("requiredNamespace")
+      ?? "";
+    const namespaces = requirement.split(/[\s,]+/).filter(Boolean);
+    return namespaces.length === 0
+      || namespaces.every((namespace) => supportedHwpxNamespaces.has(namespace));
+  });
+  return supportedCase ?? branches.find((branch) => branch.localName === "default");
+}
+
+function isInSelectedCompatibilityBranch(element: Element) {
+  let current: Element | null = element;
+  while (current?.parentElement) {
+    const parent: Element = current.parentElement;
+    if (
+      parent.localName === "switch"
+      && (current.localName === "case" || current.localName === "default")
+      && selectedCompatibilityBranch(parent) !== current
+    ) {
+      return false;
+    }
+    current = parent;
+  }
+  return true;
+}
+
+function hiddenTrackedElements(
+  root: Document,
+  hiddenDeleteChangeIds: Set<string>,
+  localName: string,
+) {
+  const hidden = new Set<Element>();
+  const activeRanges = new Set<string>();
+
+  const visit = (element: Element) => {
+    const rangeId = element.getAttribute("Id") ?? element.getAttribute("id") ?? "";
+    const changeId = element.getAttribute("TcId") ?? element.getAttribute("tcId") ?? "";
+    const rangeKey = `${changeId}:${rangeId}`;
+
+    if (element.localName === "deleteEnd" && rangeId) {
+      activeRanges.delete(rangeKey);
+    }
+    if (
+      element.localName === "deleteBegin"
+      && rangeId
+      && hiddenDeleteChangeIds.has(changeId)
+    ) {
+      activeRanges.add(rangeKey);
+    }
+    if (element.localName === localName && activeRanges.size > 0) {
+      hidden.add(element);
+    }
+
+    Array.from(element.children).forEach(visit);
+  };
+
+  if (root.documentElement) visit(root.documentElement);
+  return hidden;
+}
+
+function isInsideHiddenDocumentRegion(element: Element) {
+  return Boolean(closestAncestor(element.parentElement, "hiddenComment"));
+}
+
 function addCount(map: Map<string, number>, label: string | undefined, amount = 1) {
   if (!label || amount <= 0) return;
   map.set(label, (map.get(label) ?? 0) + amount);
@@ -301,6 +382,15 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
   }
 
   const header = parseXml(headerFile, "Contents/header.xml");
+  const hiddenDeleteChangeIds = new Set(
+    elements(header, "trackChange")
+      .filter((change) => (
+        change.getAttribute("type")?.toUpperCase() === "DELETE"
+        && ["1", "true"].includes((change.getAttribute("hide") ?? "").toLowerCase())
+      ))
+      .map((change) => change.getAttribute("id"))
+      .filter((id): id is string => Boolean(id)),
+  );
   const manifestFile = archive["Contents/content.hpf"];
   const imageSources = new Map<string, { dataUrl: string }>();
   if (manifestFile) {
@@ -413,7 +503,16 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     const section = parseXml(archive[fileName], fileName);
     const paragraphNodes = elements(section, "p");
     const paragraphIdByElement = new Map<Element, string>();
-    const pictureNodes = elements(section, "pic");
+    const picturesInHiddenDeletions = hiddenTrackedElements(
+      section,
+      hiddenDeleteChangeIds,
+      "pic",
+    );
+    const pictureNodes = elements(section, "pic").filter((picture) => (
+      !picturesInHiddenDeletions.has(picture)
+      && !isInsideHiddenDocumentRegion(picture)
+      && isInSelectedCompatibilityBranch(picture)
+    ));
     const imageIdByPicture = new Map<Element, string>();
     const imageByPicture = new Map<Element, HwpxImageInfo>();
     const pageProperties = elements(section, "pagePr")[0];
