@@ -65,6 +65,34 @@ export type HwpxImageInfo = {
   dataUrl: string;
   width?: number;
   height?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  crop?: {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+  };
+  placement: {
+    anchorParagraphId?: string;
+    inTable: boolean;
+    treatAsCharacter: boolean;
+    textWrap: string;
+    zOrder: number;
+    horizontalRelativeTo: string;
+    verticalRelativeTo: string;
+    horizontalAlign: string;
+    verticalAlign: string;
+    horizontalOffset: number;
+    verticalOffset: number;
+    pageWidth?: number;
+    pageHeight?: number;
+    contentWidth?: number;
+    contentHeight?: number;
+    marginLeft?: number;
+    marginTop?: number;
+    definitelyHidden: boolean;
+  };
 };
 
 export type HwpxDocumentBlock =
@@ -160,6 +188,36 @@ function sortedCounts(map: Map<string, number>) {
   return Array.from(map, ([label, count]) => ({ label, count })).sort(
     (a, b) => b.count - a.count || a.label.localeCompare(b.label, "ko"),
   );
+}
+
+function numericAttribute(element: Element | undefined, name: string, fallback = 0) {
+  const attribute = element?.getAttribute(name);
+  if (attribute === null || attribute === undefined || attribute.trim() === "") return fallback;
+  const value = Number(attribute);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function signedHwpUnit(value: number) {
+  return value > 0x7fffffff ? value - 0x100000000 : value;
+}
+
+function alignedOffset(offset: number, objectSize: number, referenceSize: number | undefined, align: string) {
+  if (!referenceSize || referenceSize <= 0) return offset;
+  switch (align.toUpperCase()) {
+    case "CENTER":
+      return (referenceSize - objectSize) / 2 + offset;
+    case "RIGHT":
+    case "BOTTOM":
+    case "OUTSIDE":
+      return referenceSize - objectSize - offset;
+    default:
+      return offset;
+  }
+}
+
+function isPageRelative(value: string) {
+  const normalized = value.toUpperCase();
+  return normalized === "PAGE" || normalized === "PAPER";
 }
 
 function directParagraphText(paragraph: Element) {
@@ -357,24 +415,101 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
     const paragraphIdByElement = new Map<Element, string>();
     const pictureNodes = elements(section, "pic");
     const imageIdByPicture = new Map<Element, string>();
+    const imageByPicture = new Map<Element, HwpxImageInfo>();
+    const pageProperties = elements(section, "pagePr")[0];
+    const pageMargin = pageProperties ? elements(pageProperties, "margin")[0] : undefined;
+    const pageWidth = numericAttribute(pageProperties, "width", 0) || undefined;
+    const pageHeight = numericAttribute(pageProperties, "height", 0) || undefined;
+    const marginLeft = numericAttribute(pageMargin, "left", 0);
+    const marginRight = numericAttribute(pageMargin, "right", 0);
+    const marginTop = numericAttribute(pageMargin, "top", 0);
+    const marginBottom = numericAttribute(pageMargin, "bottom", 0);
+    const contentWidth = pageWidth ? Math.max(0, pageWidth - marginLeft - marginRight) : undefined;
+    const contentHeight = pageHeight ? Math.max(0, pageHeight - marginTop - marginBottom) : undefined;
 
     pictureNodes.forEach((picture, pictureIndex) => {
-      const binaryReference = elements(picture, "img")[0]?.getAttribute("binaryItemIDRef");
+      const imageElement = elements(picture, "img")[0];
+      const binaryReference = imageElement?.getAttribute("binaryItemIDRef");
       const source = binaryReference ? imageSources.get(binaryReference) : undefined;
       if (!source) return;
       const size = elements(picture, "curSz")[0] ?? elements(picture, "sz")[0];
-      const width = Number(size?.getAttribute("width"));
-      const height = Number(size?.getAttribute("height"));
+      const originalSize = elements(picture, "orgSz")[0];
+      const clip = elements(picture, "imgClip")[0];
+      const position = elements(picture, "pos")[0];
+      const width = numericAttribute(size, "width", 0);
+      const height = numericAttribute(size, "height", 0);
+      const sourceWidth = numericAttribute(originalSize, "width", width);
+      const sourceHeight = numericAttribute(originalSize, "height", height);
+      const cropLeft = numericAttribute(clip, "left", 0);
+      const cropRight = numericAttribute(clip, "right", sourceWidth);
+      const cropTop = numericAttribute(clip, "top", 0);
+      const cropBottom = numericAttribute(clip, "bottom", sourceHeight);
+      const horizontalRelativeTo = position?.getAttribute("horzRelTo") ?? "PARA";
+      const verticalRelativeTo = position?.getAttribute("vertRelTo") ?? "PARA";
+      const horizontalAlign = position?.getAttribute("horzAlign") ?? "LEFT";
+      const verticalAlign = position?.getAttribute("vertAlign") ?? "TOP";
+      const horizontalOffset = signedHwpUnit(numericAttribute(position, "horzOffset", 0));
+      const verticalOffset = signedHwpUnit(numericAttribute(position, "vertOffset", 0));
+      const horizontalReferenceSize = isPageRelative(horizontalRelativeTo) ? pageWidth : contentWidth;
+      const verticalReferenceSize = isPageRelative(verticalRelativeTo) ? pageHeight : contentHeight;
+      const resolvedHorizontalOffset = alignedOffset(
+        horizontalOffset,
+        width,
+        horizontalReferenceSize,
+        horizontalAlign,
+      );
+      const resolvedVerticalOffset = alignedOffset(
+        verticalOffset,
+        height,
+        verticalReferenceSize,
+        verticalAlign,
+      );
+      const explicitlyHidden = ["0", "false"].includes((picture.getAttribute("visible") ?? "").toLowerCase());
+      const invalidSize = width <= 0 || height <= 0;
+      const emptyCrop = cropRight <= cropLeft || cropBottom <= cropTop;
+      const outsideHorizontalPage = isPageRelative(horizontalRelativeTo) && Boolean(pageWidth)
+        && (resolvedHorizontalOffset + width <= 0 || resolvedHorizontalOffset >= (pageWidth ?? 0));
+      const outsideVerticalPage = isPageRelative(verticalRelativeTo) && Boolean(pageHeight)
+        && (resolvedVerticalOffset + height <= 0 || resolvedVerticalOffset >= (pageHeight ?? 0));
       const imageId = `${fileName}:image:${pictureIndex}`;
       imageIdByPicture.set(picture, imageId);
       if (!imageIds.has(imageId)) {
         imageIds.add(imageId);
-        images.push({
+        const image: HwpxImageInfo = {
           id: imageId,
           dataUrl: source.dataUrl,
-          width: Number.isFinite(width) && width > 0 ? width : undefined,
-          height: Number.isFinite(height) && height > 0 ? height : undefined,
-        });
+          width: width > 0 ? width : undefined,
+          height: height > 0 ? height : undefined,
+          sourceWidth: sourceWidth > 0 ? sourceWidth : undefined,
+          sourceHeight: sourceHeight > 0 ? sourceHeight : undefined,
+          crop: {
+            left: cropLeft,
+            right: cropRight,
+            top: cropTop,
+            bottom: cropBottom,
+          },
+          placement: {
+            inTable: Boolean(closestAncestor(picture, "tbl")),
+            treatAsCharacter: picture.getAttribute("treatAsChar") === "1",
+            textWrap: picture.getAttribute("textWrap") ?? "TOP_AND_BOTTOM",
+            zOrder: numericAttribute(picture, "zOrder", 0),
+            horizontalRelativeTo,
+            verticalRelativeTo,
+            horizontalAlign,
+            verticalAlign,
+            horizontalOffset: resolvedHorizontalOffset,
+            verticalOffset: resolvedVerticalOffset,
+            pageWidth,
+            pageHeight,
+            contentWidth,
+            contentHeight,
+            marginLeft,
+            marginTop,
+            definitelyHidden: explicitlyHidden || invalidSize || emptyCrop || outsideHorizontalPage || outsideVerticalPage,
+          },
+        };
+        images.push(image);
+        imageByPicture.set(picture, image);
       }
     });
 
@@ -436,6 +571,14 @@ export async function analyzeHwpx(buffer: ArrayBuffer): Promise<HwpxAnalysis> {
           bold: styledCharacterCount > 0 && boldCharacterCount / styledCharacterCount >= 0.5,
         },
       });
+    });
+
+    pictureNodes.forEach((picture) => {
+      const image = imageByPicture.get(picture);
+      const anchorParagraph = closestAncestor(picture, "p");
+      if (image && anchorParagraph) {
+        image.placement.anchorParagraphId = paragraphIdByElement.get(anchorParagraph);
+      }
     });
 
     const handledTables = new Set<Element>();

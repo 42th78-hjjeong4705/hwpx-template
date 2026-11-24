@@ -117,20 +117,76 @@ function tableBorderCss(border: HwpxTableBorderInfo | undefined) {
   return `${Number(width.toFixed(2))}px ${style} ${border.color || "#0f172a"}`;
 }
 
-function PreviewDocumentImage({ image }: { image: HwpxImageInfo }) {
-  const width = Math.max(1, Math.round(image.width ?? 1200));
-  const height = Math.max(1, Math.round(image.height ?? 800));
+function isPageRelative(relativeTo: string) {
+  const normalized = relativeTo.toUpperCase();
+  return normalized === "PAGE" || normalized === "PAPER";
+}
+
+function PositionedDocumentImage({ image, coordinateScope }: {
+  image: HwpxImageInfo;
+  coordinateScope: "page" | "paragraph" | "cell";
+}) {
+  if (image.placement.definitelyHidden) return null;
+
+  const width = image.width ?? 0;
+  const height = image.height ?? 0;
+  if (width <= 0 || height <= 0) return null;
+
+  const sourceWidth = Math.max(1, image.sourceWidth ?? width);
+  const sourceHeight = Math.max(1, image.sourceHeight ?? height);
+  const crop = image.crop ?? { left: 0, right: sourceWidth, top: 0, bottom: sourceHeight };
+  const visibleSourceWidth = crop.right - crop.left;
+  const visibleSourceHeight = crop.bottom - crop.top;
+  if (visibleSourceWidth <= 0 || visibleSourceHeight <= 0) return null;
+
+  const placement = image.placement;
+  const contentWidth = Math.max(1, placement.contentWidth ?? placement.pageWidth ?? width);
+  const horizontalOffset = placement.horizontalOffset
+    - (isPageRelative(placement.horizontalRelativeTo) ? (placement.marginLeft ?? 0) : 0);
+  const verticalOffset = placement.verticalOffset
+    - (isPageRelative(placement.verticalRelativeTo) ? (placement.marginTop ?? 0) : 0);
+  const inline = placement.treatAsCharacter;
+  const behindText = placement.textWrap.toUpperCase() === "BEHIND_TEXT";
+  const wrapperStyle: CSSProperties = inline
+    ? {
+        position: "relative",
+        display: "inline-block",
+        width: `${Math.min(100, Math.max(0.5, width / contentWidth * 100))}%`,
+        aspectRatio: `${width} / ${height}`,
+        verticalAlign: "middle",
+        zIndex: behindText ? 0 : Math.max(2, placement.zOrder + 2),
+      }
+    : {
+        position: "absolute",
+        left: `${horizontalOffset / contentWidth * 100}%`,
+        top: `${verticalOffset / contentWidth * 100}cqw`,
+        width: `${width / contentWidth * 100}%`,
+        aspectRatio: `${width} / ${height}`,
+        zIndex: behindText ? 0 : Math.max(2, placement.zOrder + 2),
+      };
+
   return (
-    <div className="my-3 flex justify-center overflow-hidden rounded-md bg-white p-2">
+    <span
+      className="pointer-events-none overflow-hidden"
+      style={wrapperStyle}
+      data-coordinate-scope={coordinateScope}
+      aria-hidden="true"
+    >
       <Image
         src={image.dataUrl}
         alt="HWPX 문서에 포함된 이미지"
-        width={width}
-        height={height}
+        width={Math.round(sourceWidth)}
+        height={Math.round(sourceHeight)}
         unoptimized
-        className="h-auto max-h-[32rem] w-auto max-w-full object-contain"
+        className="absolute max-w-none"
+        style={{
+          left: `${-crop.left / visibleSourceWidth * 100}%`,
+          top: `${-crop.top / visibleSourceHeight * 100}%`,
+          width: `${sourceWidth / visibleSourceWidth * 100}%`,
+          height: `${sourceHeight / visibleSourceHeight * 100}%`,
+        }}
       />
-    </div>
+    </span>
   );
 }
 
@@ -141,6 +197,18 @@ function DocumentFlow({ analysis, renderParagraph }: {
   const paragraphsById = new Map(analysis.paragraphDetails.map((paragraph) => [paragraph.id, paragraph]));
   const imagesById = new Map(analysis.images.map((image) => [image.id, image]));
   const paragraphIndexes = new Map(analysis.paragraphDetails.map((paragraph, index) => [paragraph.id, index]));
+  const pageImages = analysis.images.filter((image) => (
+    !image.placement.inTable
+    && !image.placement.definitelyHidden
+    && isPageRelative(image.placement.verticalRelativeTo)
+  ));
+  const pageImageIds = new Set(pageImages.map((image) => image.id));
+  const imagesByParagraph = new Map<string, HwpxImageInfo[]>();
+  analysis.images.forEach((image) => {
+    const paragraphId = image.placement.anchorParagraphId;
+    if (!paragraphId || pageImageIds.has(image.id) || image.placement.definitelyHidden) return;
+    imagesByParagraph.set(paragraphId, [...(imagesByParagraph.get(paragraphId) ?? []), image]);
+  });
   const blocks = analysis.documentBlocks.length > 0
     ? analysis.documentBlocks
     : analysis.paragraphDetails.map((paragraph) => ({
@@ -149,16 +217,46 @@ function DocumentFlow({ analysis, renderParagraph }: {
       paragraphId: paragraph.id,
     }));
 
-  return blocks.map((block) => {
+  const renderParagraphWithImages = (paragraph: HwpxParagraphInfo) => {
+    const paragraphImages = imagesByParagraph.get(paragraph.id) ?? [];
+    return (
+      <div className="relative" style={{ containerType: "inline-size" }}>
+        <div className="relative z-[1]">
+          {renderParagraph(paragraph, paragraphIndexes.get(paragraph.id) ?? 0)}
+        </div>
+        {paragraphImages.map((image) => (
+          <PositionedDocumentImage
+            key={image.id}
+            image={image}
+            coordinateScope={image.placement.inTable ? "cell" : "paragraph"}
+          />
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="relative" style={{ containerType: "inline-size" }}>
+      {pageImages.map((image) => (
+        <PositionedDocumentImage key={image.id} image={image} coordinateScope="page" />
+      ))}
+      {blocks.map((block) => {
     if (block.type === "paragraph") {
       const paragraph = paragraphsById.get(block.paragraphId);
       if (!paragraph) return null;
-      return <div key={block.id}>{renderParagraph(paragraph, paragraphIndexes.get(paragraph.id) ?? 0)}</div>;
+      return <div key={block.id}>{renderParagraphWithImages(paragraph)}</div>;
     }
 
     if (block.type === "image") {
       const image = imagesById.get(block.imageId);
-      return image ? <PreviewDocumentImage key={block.id} image={image} /> : null;
+      if (!image || image.placement.definitelyHidden || image.placement.anchorParagraphId || pageImageIds.has(image.id)) {
+        return null;
+      }
+      return (
+        <div key={block.id} className="relative h-0" style={{ containerType: "inline-size" }}>
+          <PositionedDocumentImage image={image} coordinateScope="paragraph" />
+        </div>
+      );
     }
 
     return (
@@ -181,11 +279,16 @@ function DocumentFlow({ analysis, renderParagraph }: {
                       {cell.paragraphIds.map((paragraphId) => {
                           const paragraph = paragraphsById.get(paragraphId);
                           if (!paragraph) return null;
-                          return <div key={paragraphId}>{renderParagraph(paragraph, paragraphIndexes.get(paragraphId) ?? 0)}</div>;
+                          return <div key={paragraphId}>{renderParagraphWithImages(paragraph)}</div>;
                         })}
                       {cell.imageIds.map((imageId) => {
                         const image = imagesById.get(imageId);
-                        return image ? <PreviewDocumentImage key={imageId} image={image} /> : null;
+                        if (!image || image.placement.anchorParagraphId || image.placement.definitelyHidden) return null;
+                        return (
+                          <div key={imageId} className="relative h-0" style={{ containerType: "inline-size" }}>
+                            <PositionedDocumentImage image={image} coordinateScope="cell" />
+                          </div>
+                        );
                       })}
                       {cell.paragraphIds.length === 0 && cell.imageIds.length === 0 && <div className="min-h-6" aria-label="빈 표 셀" />}
                     </td>
@@ -197,7 +300,9 @@ function DocumentFlow({ analysis, renderParagraph }: {
         </table>
       </div>
     );
-  });
+      })}
+    </div>
+  );
 }
 
 function ComparisonPreview({ title, badge, analysis, accent }: {
